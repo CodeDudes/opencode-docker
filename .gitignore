@@ -2,3 +2,6 @@
 app.pem
 *.pem
 
+# Persistent runtime data, caches, and session history
+data/
+.data/

@@ -20,12 +20,12 @@ apply_token() {
     fi
 
     # 1. Update Git credential store
-    echo "https://x-access-token:${token}@github.com" > /root/.git-credentials
-    chmod 600 /root/.git-credentials
+    echo "https://x-access-token:${token}@github.com" > "${HOME}/.git-credentials"
+    chmod 600 "${HOME}/.git-credentials"
 
     # 2. Update GitHub CLI (gh) configuration
-    mkdir -p /root/.config/gh
-    cat << YAML > /root/.config/gh/hosts.yml
+    mkdir -p "${HOME}/.config/gh"
+    cat << YAML > "${HOME}/.config/gh/hosts.yml"
 github.com:
     oauth_token: ${token}
     user: ${GIT_AUTHOR_NAME:-opencode-bot}
@@ -35,7 +35,7 @@ YAML
 
 # 1. Configure Git globals
 git config --global --add safe.directory /workspace
-git config --global credential.helper "store --file /root/.git-credentials"
+git config --global credential.helper "store --file ${HOME}/.git-credentials"
 git config --global url."https://github.com/".insteadOf "git@github.com:"
 git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
 
