@@ -1,0 +1,4 @@
+# Private keys and secrets
+app.pem
+*.pem
+
