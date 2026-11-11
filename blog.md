@@ -429,6 +429,7 @@ GitHub App installation tokens expire after **60 minutes**.
 ### 5. Non-Root Execution & Dynamic Host UID/GID Mapping
 * **Blast Radius Reduction:** Autonomous coding agents execute untrusted scripts and test suites. Running as non-root ensures agents cannot alter container system binaries or exploit root-only container breakout vectors.
 * **Zero Linux File Permission Conflicts:** On Linux, Docker processes share the host kernel. The entrypoint inspects `/workspace` at startup and maps the `opencode` user to your host user's exact numeric UID and GID before dropping privileges via `su-exec`. Every file, directory, or Git commit created in `/workspace` is owned by your host user account—never `root:root`.
+* **Strict Package Philosophy:** The container intentionally omits `sudo`. Developer packages (`npm`, `pnpm`, `uv pip`, `go install`) install freely into user/workspace paths without root. If a new OS-level utility (e.g. `ffmpeg`, `ripgrep`) is needed, add it to `Dockerfile` and run `ocd --rebuild` to keep your environment reproducible and auditable.
 
 ---
 
