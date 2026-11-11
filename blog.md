@@ -42,7 +42,8 @@ Consolidates build files and persistent state into two folders:
 
 ```bash
 mkdir -p ~/opencode-docker
-mkdir -p ~/opencode-data/{config,share,state,go,cache}
+mkdir -p ~/opencode-data/global/{config,state}
+mkdir -p ~/opencode-data/projects
 ```
 
 Move your downloaded GitHub App private key into `~/opencode-docker/app.pem` and restrict its permissions to owner-read-only:
@@ -305,14 +306,24 @@ ocd () {
 	)
 
 	if [ "$sandbox_mode" = false ]; then
-		# Trusted Mode: mount persistent directories
-		mkdir -p "$data_root"/{config,share,state,go,cache}
+		# 1. SHARED: Global settings, commands, MCP servers & model preferences
+		mkdir -p "$data_root/global"/{config,state}
 		mounts+=(
-			-v "$data_root/go":/root/go
-			-v "$data_root/cache":/root/.cache
-			-v "$data_root/config":/root/.config/opencode
-			-v "$data_root/share":/root/.local/share/opencode
-			-v "$data_root/state":/root/.local/state/opencode
+			-v "$data_root/global/config":/root/.config/opencode
+			-v "$data_root/global/state":/root/.local/state/opencode
+		)
+
+		# 2. ISOLATED: Caches and session histories scoped strictly to this repository
+		local project_name=$(basename "$absolute_path")
+		local project_hash=$(python3 -c "import hashlib; print(hashlib.md5('''$absolute_path'''.encode()).hexdigest()[:8])" 2>/dev/null || printf '%s' "$absolute_path" | md5sum 2>/dev/null | cut -c1-8 || printf '%s' "$absolute_path" | md5 2>/dev/null | cut -c1-8)
+		local project_id="${project_name}-${project_hash}"
+		local project_data="$data_root/projects/$project_id"
+
+		mkdir -p "$project_data"/{cache,go,share}
+		mounts+=(
+			-v "$project_data/cache":/root/.cache
+			-v "$project_data/go":/root/go
+			-v "$project_data/share":/root/.local/share/opencode
 		)
 	fi
 
@@ -348,9 +359,18 @@ source ~/.bashrc
 
 ## Critical Components Explained
 
-### 1. Trusted Mode vs. `--sandbox` Mode
-* **Standard `ocd` (Trusted Projects):** Mounts `~/opencode-data` for convenient chat history persistence, model selection memory, and shared Go/pip caches.
-* **`ocd --sandbox` (Untrusted / Third-Party Repos):** Does not mount `auth.json` or shared caches. Prevents untrusted repositories from stealing stored LLM API keys or poisoning your build caches.
+### 1. Shared Global Config vs. Per-Project Isolated Caches
+OpenCode's storage is split across two tiers:
+
+* **Global Tier (`~/opencode-data/global/`):**
+  * `config`: Stores your `opencode.json`, custom commands, UI themes, and MCP server configurations. This is shared so you configure tools and prompts once and use them everywhere.
+  * `state`: Stores `model.json`, remembering your preferred LLM model across all sessions.
+* **Per-Project Isolated Tier (`~/opencode-data/projects/<repo-name>-<hash>/`):**
+  * `cache`: Caches for `pip`, `uv`, and `npm` are scoped strictly to the repository. This prevents cache-poisoning attacks where a dependency in Repo A tampers with wheels used by Repo B.
+  * `go`: Module downloads and `go/bin` binaries are isolated, preventing malicious tools installed in one project from polluting the `$PATH` in another.
+  * `share`: SQLite conversation transcripts and history databases remain strictly scoped to the repository, ensuring private discussions from proprietary repos never bleed into open-source repo sessions.
+* **Sandbox Mode (`--sandbox`):**
+  * For completely untrusted or disposable tasks, `--sandbox` unmounts all project-level persistent storage, leaving zero trace on your host machine when the session ends.
 
 ### 2. Transparent SSH-to-HTTPS Git Rewriting
 On your host, repositories are often cloned using SSH (`git@github.com:org/repo.git`). GitHub Apps authenticate over HTTPS using `x-access-token`. The entrypoint runs:
@@ -381,4 +401,6 @@ GitHub App installation tokens expire after **60 minutes**.
 * **Launch in a specific repo:** `ocd ~/projects/my-repo`
 * **Launch in sandbox mode (untrusted code):** `ocd --sandbox ~/projects/untrusted-repo`
 * **Rebuild image to update dependencies:** `ocd --rebuild`
+* **Clear cache for a specific repo:** `rm -rf ~/opencode-data/projects/<project-id>/cache`
+* **Clear chat history for a specific repo:** `rm -rf ~/opencode-data/projects/<project-id>/share`
 * **Migrate to a new machine:** Copy `~/opencode-docker` and `~/opencode-data` to your new machine, add the `ocd` function to your `~/.zshrc` or `~/.bashrc`, and run `ocd`.
