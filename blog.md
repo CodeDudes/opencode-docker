@@ -37,13 +37,12 @@ Create a dedicated GitHub App in your GitHub Organization or personal account se
 
 ---
 
-### 2. Create the Directory Structure on Your Machine
-Consolidates build files and persistent state into two folders:
+### 2. Set Up the Repository Directory on Your Machine
+All build files, private keys, and runtime caches are consolidated directly inside `~/opencode-docker`:
 
 ```bash
-mkdir -p ~/opencode-docker
-mkdir -p ~/opencode-data/global/{config,state}
-mkdir -p ~/opencode-data/projects
+mkdir -p ~/opencode-docker/data/global/{config,state}
+mkdir -p ~/opencode-docker/data/projects
 ```
 
 Move your downloaded GitHub App private key into `~/opencode-docker/app.pem` and restrict its permissions to owner-read-only:
@@ -177,9 +176,9 @@ ocd () {
 	# ================= CONFIGURATION =================
 	local image_name="opencode-dev:latest"
 	local dockerfile_dir="$HOME/opencode-docker"
-	local bot_key_path="$HOME/opencode-docker/app.pem"
-	local entrypoint_script="$HOME/opencode-docker/docker-entrypoint.sh"
-	local data_root="$HOME/opencode-data"
+	local bot_key_path="$dockerfile_dir/app.pem"
+	local entrypoint_script="$dockerfile_dir/docker-entrypoint.sh"
+	local data_root="$dockerfile_dir/data"
 
 	local gh_app_id="YOUR_APP_ID"                          # <-- Replace with App ID
 	local gh_install_id="YOUR_INSTALLATION_ID"              # <-- Replace with Installation ID
@@ -362,10 +361,10 @@ source ~/.bashrc
 ### 1. Shared Global Config vs. Per-Project Isolated Caches
 OpenCode's storage is split across two tiers:
 
-* **Global Tier (`~/opencode-data/global/`):**
+* **Global Tier (`~/opencode-docker/data/global/`):**
   * `config`: Stores your `opencode.json`, custom commands, UI themes, and MCP server configurations. This is shared so you configure tools and prompts once and use them everywhere.
   * `state`: Stores `model.json`, remembering your preferred LLM model across all sessions.
-* **Per-Project Isolated Tier (`~/opencode-data/projects/<repo-name>-<hash>/`):**
+* **Per-Project Isolated Tier (`~/opencode-docker/data/projects/<repo-name>-<hash>/`):**
   * `cache`: Caches for `pip`, `uv`, and `npm` are scoped strictly to the repository. This prevents cache-poisoning attacks where a dependency in Repo A tampers with wheels used by Repo B.
   * `go`: Module downloads and `go/bin` binaries are isolated, preventing malicious tools installed in one project from polluting the `$PATH` in another.
   * `share`: SQLite conversation transcripts and history databases remain strictly scoped to the repository, ensuring private discussions from proprietary repos never bleed into open-source repo sessions.
@@ -401,6 +400,6 @@ GitHub App installation tokens expire after **60 minutes**.
 * **Launch in a specific repo:** `ocd ~/projects/my-repo`
 * **Launch in sandbox mode (untrusted code):** `ocd --sandbox ~/projects/untrusted-repo`
 * **Rebuild image to update dependencies:** `ocd --rebuild`
-* **Clear cache for a specific repo:** `rm -rf ~/opencode-data/projects/<project-id>/cache`
-* **Clear chat history for a specific repo:** `rm -rf ~/opencode-data/projects/<project-id>/share`
-* **Migrate to a new machine:** Copy `~/opencode-docker` and `~/opencode-data` to your new machine, add the `ocd` function to your `~/.zshrc` or `~/.bashrc`, and run `ocd`.
+* **Clear cache for a specific repo:** `rm -rf ~/opencode-docker/data/projects/<project-id>/cache`
+* **Clear chat history for a specific repo:** `rm -rf ~/opencode-docker/data/projects/<project-id>/share`
+* **Migrate to a new machine:** Copy the single `~/opencode-docker` folder to your new machine, add the `ocd` function to your `~/.zshrc` or `~/.bashrc`, and run `ocd`. All chat histories, keys, and configurations will be immediately available.
