@@ -1,0 +1,12 @@
+# Exclude secrets and private keys
+app.pem
+*.pem
+
+# Exclude persistent data, caches, and session history
+data/
+.data/
+
+# Exclude repository metadata and documentation from build context
+.git
+.gitignore
+*.md
