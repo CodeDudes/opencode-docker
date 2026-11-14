@@ -103,7 +103,27 @@ ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 ---
 
-### 4. Create the Unified Entrypoint Script
+### 4. Create .dockerignore (Build Context Protection)
+Prevents secrets, keys, and caches from being transferred to the Docker daemon during `docker build`. Create `~/opencode-docker/.dockerignore`:
+
+```dockerignore
+# Exclude secrets and private keys
+app.pem
+*.pem
+
+# Exclude persistent data, caches, and session history
+data/
+.data/
+
+# Exclude repository metadata and documentation from build context
+.git
+.gitignore
+*.md
+```
+
+---
+
+### 5. Create the Unified Entrypoint Script
 Create `~/opencode-docker/docker-entrypoint.sh`:
 
 ```bash
@@ -126,8 +146,9 @@ if [ -d "/workspace" ]; then
     fi
 fi
 
-# Ensure user owns their home directory and subdirectories
-chown -R "$USER_NAME:$USER_NAME" "$USER_HOME" 2>/dev/null || true
+# Ensure user owns top-level home directories without slow recursive traversal
+mkdir -p "$USER_HOME"/{.config,.local,.cache,go} 2>/dev/null || true
+chown "$USER_NAME:$USER_NAME" "$USER_HOME" "$USER_HOME"/{.config,.local,.cache,go} 2>/dev/null || true
 
 get_current_token() {
     if [ -f "$TOKEN_FILE" ]; then
@@ -201,7 +222,7 @@ chmod +x ~/opencode-docker/docker-entrypoint.sh
 
 ---
 
-### 5. Add the `ocd` Launcher Function to your Shell (`~/.zshrc` or `~/.bashrc`)
+### 6. Add the `ocd` Launcher Function to your Shell (`~/.zshrc` or `~/.bashrc`)
 Add the `ocd` function to the bottom of your `~/.zshrc` (macOS) or `~/.bashrc` (Linux), replacing the three placeholder variables with your GitHub App details:
 
 ```bash
@@ -367,6 +388,7 @@ ocd () {
 
 	echo "Launching OpenCode in: $absolute_path (as $bot_name)"
 	docker run -it --rm \
+		--init \
 		--security-opt=no-new-privileges:true \
 		--pids-limit 1024 \
 		"${mounts[@]}" \
@@ -434,8 +456,10 @@ GitHub App installation tokens expire after **60 minutes**.
 
 ### 6. Container Runtime Hardening & Stable Builds
 * **Deterministic Stable Repositories:** All toolchain packages (`nodejs`, `python3`, `uv`, `go`, `git`, `gh`, `build-base`) are installed from Alpine's official stable repository rather than rolling `edge` branches, guaranteeing reproducible and reliable builds.
+* **Build Context Protection (`.dockerignore`):** Blocks `app.pem`, `data/`, and `.git/` from being sent to the Docker build daemon, preventing key leakage and eliminating build slowness.
 * **Privilege Escalation Prevention (`--security-opt=no-new-privileges:true`):** Prevents any child processes inside the container from gaining additional privileges via SUID/SGID binaries.
 * **Resource Exhaustion & Fork-Bomb Protection (`--pids-limit 1024`):** Limits maximum concurrent processes to 1024, preventing rogue scripts, runaway thread pools, or fork-bombs from freezing the host system.
+* **Zombie Process Reaping (`--init`):** Uses Docker's tiny init system (`tini`) to handle process signaling and automatically reap orphaned/zombie processes left behind by compilers, linters, or test runners.
 
 ---
 

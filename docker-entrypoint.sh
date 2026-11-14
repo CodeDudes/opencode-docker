@@ -17,8 +17,9 @@ if [ -d "/workspace" ]; then
     fi
 fi
 
-# Ensure user owns their home directory and subdirectories
-chown -R "$USER_NAME:$USER_NAME" "$USER_HOME" 2>/dev/null || true
+# Ensure user owns top-level home directories without slow recursive traversal
+mkdir -p "$USER_HOME"/{.config,.local,.cache,go} 2>/dev/null || true
+chown "$USER_NAME:$USER_NAME" "$USER_HOME" "$USER_HOME"/{.config,.local,.cache,go} 2>/dev/null || true
 
 get_current_token() {
     if [ -f "$TOKEN_FILE" ]; then
