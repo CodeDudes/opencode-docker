@@ -2,10 +2,8 @@ FROM ghcr.io/anomalyco/opencode:latest
 
 USER root
 
-# Install development toolchains, utilities, and su-exec for privilege dropping
+# Install development toolchains, utilities, and su-exec for privilege dropping from stable repositories
 RUN apk add --no-cache \
-    --repository=https://dl-cdn.alpinelinux.org/alpine/edge/main \
-    --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community \
     git \
     github-cli \
     openssh-client \

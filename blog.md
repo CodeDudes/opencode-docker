@@ -13,6 +13,7 @@ Running an autonomous coding agent directly on your host machine gives it access
 | **Short-Lived Ephemeral Tokens** | Mints 1-hour GitHub installation tokens via a 9-minute RS256 JWT; refreshed by the host every 45 minutes. | Eliminates long-lived static tokens. If a token is leaked in logs, it expires within an hour. |
 | **Zero Private Key Exposure** | Keeps `app.pem` strictly on the host. Mounts only an ephemeral token to `/run/secrets/github_token:ro`. | Prevents the GitHub App private key from being stolen by prompt injection, malicious packages, or agent tools. |
 | **Non-Root Execution** | Drops root via `su-exec` to an `opencode` user mapped to the host's exact UID/GID. | Eliminates container breakout blast radius and prevents `root:root` file ownership issues on Linux. |
+| **Runtime Hardening** | `--security-opt=no-new-privileges:true` and `--pids-limit 1024`. | Blocks SUID privilege escalation and protects host against fork-bombs / resource starvation. |
 
 ---
 
@@ -63,10 +64,8 @@ FROM ghcr.io/anomalyco/opencode:latest
 
 USER root
 
-# Install development toolchains, utilities, and su-exec for privilege dropping
+# Install development toolchains, utilities, and su-exec for privilege dropping from stable repositories
 RUN apk add --no-cache \
-    --repository=https://dl-cdn.alpinelinux.org/alpine/edge/main \
-    --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community \
     git \
     github-cli \
     openssh-client \
@@ -368,6 +367,8 @@ ocd () {
 
 	echo "Launching OpenCode in: $absolute_path (as $bot_name)"
 	docker run -it --rm \
+		--security-opt=no-new-privileges:true \
+		--pids-limit 1024 \
 		"${mounts[@]}" \
 		"${env_args[@]}" \
 		--workdir /workspace \
@@ -429,6 +430,12 @@ GitHub App installation tokens expire after **60 minutes**.
 ### 5. Non-Root Execution & Dynamic Host UID/GID Mapping
 * **Blast Radius Reduction:** Autonomous coding agents execute untrusted scripts and test suites. Running as non-root ensures agents cannot alter container system binaries or exploit root-only container breakout vectors.
 * **Zero Linux File Permission Conflicts:** On Linux, Docker processes share the host kernel. The entrypoint inspects `/workspace` at startup and maps the `opencode` user to your host user's exact numeric UID and GID before dropping privileges via `su-exec`. Every file, directory, or Git commit created in `/workspace` is owned by your host user account—never `root:root`.
+* **Strict Package Philosophy:** The container intentionally omits `sudo`. Developer packages (`npm`, `pnpm`, `uv pip`, `go install`) install freely into user/workspace paths without root. If a new OS-level utility (e.g. `ffmpeg`, `ripgrep`) is needed, add it to `Dockerfile` and run `ocd --rebuild` to keep your environment reproducible and auditable.
+
+### 6. Container Runtime Hardening & Stable Builds
+* **Deterministic Stable Repositories:** All toolchain packages (`nodejs`, `python3`, `uv`, `go`, `git`, `gh`, `build-base`) are installed from Alpine's official stable repository rather than rolling `edge` branches, guaranteeing reproducible and reliable builds.
+* **Privilege Escalation Prevention (`--security-opt=no-new-privileges:true`):** Prevents any child processes inside the container from gaining additional privileges via SUID/SGID binaries.
+* **Resource Exhaustion & Fork-Bomb Protection (`--pids-limit 1024`):** Limits maximum concurrent processes to 1024, preventing rogue scripts, runaway thread pools, or fork-bombs from freezing the host system.
 
 ---
 
