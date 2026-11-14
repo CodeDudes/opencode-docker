@@ -1,6 +1,9 @@
 # Private keys and secrets
 app.pem
 *.pem
+.env
+*.env
+!.env.example
 
 # Persistent runtime data, caches, and session history
 data/

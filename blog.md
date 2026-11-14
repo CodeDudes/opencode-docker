@@ -14,6 +14,7 @@ Running an autonomous coding agent directly on your host machine gives it access
 | **Zero Private Key Exposure** | Keeps `app.pem` strictly on the host. Mounts only an ephemeral token to `/run/secrets/github_token:ro`. | Prevents the GitHub App private key from being stolen by prompt injection, malicious packages, or agent tools. |
 | **Non-Root Execution** | Container runs natively as non-root user `opencode` (matching host UID/GID at build time). | Eliminates container breakout blast radius and ensures seamless file ownership on macOS and Linux. |
 | **Runtime Hardening** | `--security-opt=no-new-privileges:true` and `--pids-limit 1024`. | Blocks SUID privilege escalation and protects host against fork-bombs / resource starvation. |
+| **Resilient Token Refresher & Trap Safety** | Parent PID liveness checks, retry with backoff, and process isolation via standalone `ocd` CLI. | Eliminates lingering background loops, avoids shell trap pollution, and prevents auth failure on network blips. |
 
 ---
 
@@ -215,199 +216,351 @@ chmod +x ~/opencode-docker/docker-entrypoint.sh
 
 ---
 
-### 6. Add the `ocd` Launcher Function to your Shell (`~/.zshrc` or `~/.bashrc`)
-Add the `ocd` function to the bottom of your `~/.zshrc` (macOS) or `~/.bashrc` (Linux), replacing the three placeholder variables with your GitHub App details:
+### 6. Configure Environment (`.env`) & Install `ocd` CLI
+
+Instead of copy-pasting a 150-line shell function into your profile, OpenCode Docker provides a standalone executable CLI (`ocd`) and a `.env` configuration template.
+
+#### Step A: Configure your `.env` file
+Copy `.env.example` to `.env` inside `~/opencode-docker/`:
 
 ```bash
-ocd () {
-	# ================= CONFIGURATION =================
-	local image_name="opencode-dev:latest"
-	local dockerfile_dir="$HOME/opencode-docker"
-	local bot_key_path="$dockerfile_dir/app.pem"
-	local entrypoint_script="$dockerfile_dir/docker-entrypoint.sh"
-	local data_root="$dockerfile_dir/data"
-
-	local gh_app_id="YOUR_APP_ID"                          # <-- Replace with App ID
-	local gh_install_id="YOUR_INSTALLATION_ID"              # <-- Replace with Installation ID
-	local gh_app_slug="your-org-opencode-bot"               # <-- Replace with App Slug
-	# =================================================
-
-	local bot_name="${gh_app_slug}[bot]"
-	local bot_email="${gh_app_id}+${gh_app_slug}[bot]@users.noreply.github.com"
-	local sandbox_mode=false
-
-	# 1. Parse optional flags
-	while [ $# -gt 0 ]; do
-		case "$1" in
-			--rebuild)
-				echo "Rebuilding $image_name..."
-				docker build --pull \
-					--build-arg USER_UID="$(id -u)" \
-					--build-arg USER_GID="$(id -g)" \
-					-t "$image_name" -f "$dockerfile_dir/Dockerfile" "$dockerfile_dir" || return 1
-				shift
-				;;
-			--sandbox|--isolated)
-				sandbox_mode=true
-				echo "🔒 Running in SANDBOX mode: host caches and stored credentials disabled."
-				shift
-				;;
-			-*)
-				echo "Unknown option: $1" >&2
-				return 1
-				;;
-			*)
-				break
-				;;
-		esac
-	done
-
-	# 2. Resolve target workspace directory
-	local target_dir="${1:-.}"
-	local absolute_path
-	if [ -d "$target_dir" ]; then
-		absolute_path=$(cd "$target_dir" && pwd)
-		[ $# -gt 0 ] && shift
-	else
-		echo "Error: Directory '$target_dir' does not exist." >&2
-		return 1
-	fi
-
-	# 3. Validate host files
-	if [ ! -f "$bot_key_path" ]; then
-		echo "Error: GitHub App private key not found at '$bot_key_path'" >&2
-		return 1
-	fi
-	chmod 600 "$bot_key_path"
-
-	# 4. Host-side token minting (OpenSSL + curl + python3/jq)
-	_mint_gh_token() {
-		local now=$(date +%s)
-		local iat=$((now - 60))
-		local exp=$((now + 540))
-
-		local b64enc="openssl base64 -e -A | tr '+/' '-_' | tr -d '='"
-		local header=$(printf '{"alg":"RS256","typ":"JWT"}' | eval "$b64enc")
-		local payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$iat" "$exp" "$gh_app_id" | eval "$b64enc")
-		local sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$bot_key_path" | eval "$b64enc")
-		local jwt="${header}.${payload}.${sig}"
-
-		curl -sf -X POST \
-			-H "Authorization: Bearer $jwt" \
-			-H "Accept: application/vnd.github+json" \
-			"https://api.github.com/app/installations/${gh_install_id}/access_tokens" \
-			| python3 -c "import sys, json; print(json.load(sys.stdin)['token'])"
-	}
-
-	# 5. Create secure per-session token file in $TMPDIR
-	local token_file=$(mktemp "${TMPDIR:-/tmp}/opencode_token.XXXXXX")
-	chmod 600 "$token_file"
-
-	local initial_token
-	initial_token=$(_mint_gh_token)
-	if [ -z "$initial_token" ]; then
-		echo "Error: Failed to mint GitHub installation token." >&2
-		rm -f "$token_file"
-		return 1
-	fi
-	echo "$initial_token" > "$token_file"
-
-	# 6. Background token refresher on host (refreshes every 45 min)
-	(
-		while [ -f "$token_file" ]; do
-			sleep 2700
-			local new_token
-			new_token=$(_mint_gh_token 2>/dev/null)
-			if [ -n "$new_token" ]; then
-				echo "$new_token" > "${token_file}.tmp" && mv "${token_file}.tmp" "$token_file"
-			fi
-		done
-	) &
-	local refresh_pid=$!
-
-	# Cleanup handler when container exits
-	cleanup() {
-		kill "$refresh_pid" 2>/dev/null || true
-		rm -f "$token_file" "${token_file}.tmp" 2>/dev/null || true
-	}
-	trap cleanup EXIT INT TERM
-
-	# 7. Assemble volume mounts and environment flags
-	local mounts=(
-		-v "$absolute_path":/workspace
-		-v "$token_file":/run/secrets/github_token:ro
-	)
-
-	# If entrypoint script exists on host, mount it (allows live script edits without image rebuild)
-	if [ -f "$entrypoint_script" ]; then
-		mounts+=(-v "$entrypoint_script":/usr/local/bin/docker-entrypoint.sh:ro)
-	fi
-
-	local env_args=(
-		-e GIT_AUTHOR_NAME="$bot_name"
-		-e GIT_AUTHOR_EMAIL="$bot_email"
-		-e GIT_COMMITTER_NAME="$bot_name"
-		-e GIT_COMMITTER_EMAIL="$bot_email"
-		${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"}
-		${OPENAI_API_KEY:+-e OPENAI_API_KEY="$OPENAI_API_KEY"}
-		${GEMINI_API_KEY:+-e GEMINI_API_KEY="$GEMINI_API_KEY"}
-		${OPENROUTER_API_KEY:+-e OPENROUTER_API_KEY="$OPENROUTER_API_KEY"}
-	)
-
-	if [ "$sandbox_mode" = false ]; then
-		# 1. SHARED: Global settings, commands, MCP servers & model preferences
-		mkdir -p "$data_root/global"/{config,state}
-		mounts+=(
-			-v "$data_root/global/config":/home/opencode/.config/opencode
-			-v "$data_root/global/state":/home/opencode/.local/state/opencode
-		)
-
-		# 2. ISOLATED: Caches and session histories scoped strictly to this repository
-		local project_name=$(basename "$absolute_path")
-		local project_hash=$(python3 -c "import hashlib; print(hashlib.md5('''$absolute_path'''.encode()).hexdigest()[:8])" 2>/dev/null || printf '%s' "$absolute_path" | md5sum 2>/dev/null | cut -c1-8 || printf '%s' "$absolute_path" | md5 2>/dev/null | cut -c1-8)
-		local project_id="${project_name}-${project_hash}"
-		local project_data="$data_root/projects/$project_id"
-
-		mkdir -p "$project_data"/{cache,go,share}
-		mounts+=(
-			-v "$project_data/cache":/home/opencode/.cache
-			-v "$project_data/go":/home/opencode/go
-			-v "$project_data/share":/home/opencode/.local/share/opencode
-		)
-	fi
-
-	# 8. Build image automatically on first run
-	if ! docker image inspect "$image_name" >/dev/null 2>&1; then
-		echo "Building $image_name..."
-		docker build \
-			--build-arg USER_UID="$(id -u)" \
-			--build-arg USER_GID="$(id -g)" \
-			-t "$image_name" -f "$dockerfile_dir/Dockerfile" "$dockerfile_dir" || { cleanup; return 1; }
-	fi
-
-	echo "Launching OpenCode in: $absolute_path (as $bot_name)"
-	docker run -it --rm \
-		--init \
-		--security-opt=no-new-privileges:true \
-		--pids-limit 1024 \
-		"${mounts[@]}" \
-		"${env_args[@]}" \
-		--workdir /workspace \
-		"$image_name" "$@"
-
-	cleanup
-	trap - EXIT INT TERM
-}
+cp ~/opencode-docker/.env.example ~/opencode-docker/.env
 ```
 
-Reload your shell configuration:
+Edit `~/opencode-docker/.env` with your GitHub App credentials and API keys:
+
+```dotenv
+# GitHub App Configuration
+GH_APP_ID="YOUR_APP_ID"
+GH_INSTALLATION_ID="YOUR_INSTALLATION_ID"
+GH_APP_SLUG="your-org-opencode-bot"
+
+# Optional LLM API keys:
+ANTHROPIC_API_KEY="sk-ant-..."
+OPENAI_API_KEY="sk-..."
+GEMINI_API_KEY="AIzaSy..."
+```
+
+*(Note: `.env` is ignored by `.gitignore` and `.dockerignore` so secrets are never committed or transferred to the Docker daemon).*
+
+#### Step B: Install `ocd` to your PATH
+
+Make `ocd` executable and symlink it to your local binary path (e.g. `~/.local/bin` or `/usr/local/bin`):
 
 ```bash
-# On macOS (zsh):
-source ~/.zshrc
+chmod +x ~/opencode-docker/ocd
+mkdir -p ~/.local/bin
+ln -sf ~/opencode-docker/ocd ~/.local/bin/ocd
+```
 
-# On Linux (bash):
-source ~/.bashrc
+Ensure `~/.local/bin` is in your `$PATH` (standard on modern Linux and macOS):
+
+```bash
+# Add to ~/.zshrc or ~/.bashrc if needed:
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Alternatively, you can define a one-line alias in your `~/.zshrc` / `~/.bashrc`:
+
+```bash
+alias ocd="$HOME/opencode-docker/ocd"
+```
+
+#### Step C: The Standalone `ocd` CLI Script (`~/opencode-docker/ocd`)
+The complete source of `~/opencode-docker/ocd`:
+
+```bash
+#!/usr/bin/env bash
+# =============================================================================
+# OpenCode Docker CLI (ocd)
+# Runs autonomous coding agents in an ephemeral, hardened Docker container
+# with GitHub App credentials, non-root execution, and tiered storage.
+# =============================================================================
+
+set -e
+
+# -----------------------------------------------------------------------------
+# 1. Resolve Script Directory Across Symlinks (macOS & Linux Portable)
+# -----------------------------------------------------------------------------
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# -----------------------------------------------------------------------------
+# 2. Load Configuration (.env file or Environment Variables)
+# -----------------------------------------------------------------------------
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/.env"
+    set +a
+fi
+
+GH_APP_ID="${GH_APP_ID:-${gh_app_id:-}}"
+GH_INSTALLATION_ID="${GH_INSTALLATION_ID:-${gh_install_id:-}}"
+GH_APP_SLUG="${GH_APP_SLUG:-${gh_app_slug:-opencode-bot}}"
+IMAGE_NAME="${OPENCODE_IMAGE:-opencode-dev:latest}"
+BOT_KEY_PATH="${GH_APP_KEY_PATH:-$SCRIPT_DIR/app.pem}"
+DATA_ROOT="$SCRIPT_DIR/data"
+ENTRYPOINT_SCRIPT="$SCRIPT_DIR/docker-entrypoint.sh"
+
+BOT_NAME="${GH_APP_SLUG}[bot]"
+BOT_EMAIL="${GH_APP_ID}+${GH_APP_SLUG}[bot]@users.noreply.github.com"
+SANDBOX_MODE=false
+
+# -----------------------------------------------------------------------------
+# 3. Parse CLI Flags
+# -----------------------------------------------------------------------------
+show_help() {
+    cat << EOF
+OpenCode Docker CLI (ocd)
+
+Usage:
+  ocd [options] [workspace_dir] [-- <agent args>]
+
+Options:
+  --rebuild            Rebuild the Docker image with your host UID/GID
+  --sandbox, --isolated Run in disposable sandbox mode (no caches or stored state)
+  -h, --help           Show this help message and exit
+
+Examples:
+  ocd                      # Launch OpenCode in current directory
+  ocd ~/projects/my-repo   # Launch OpenCode in specified directory
+  ocd --sandbox .          # Launch isolated session for inspecting untrusted code
+  ocd --rebuild            # Rebuild container image with updated dependencies
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        --rebuild)
+            echo "Rebuilding $IMAGE_NAME..."
+            docker build --pull \
+                --build-arg USER_UID="$(id -u)" \
+                --build-arg USER_GID="$(id -g)" \
+                -t "$IMAGE_NAME" -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
+            shift
+            ;;
+        --sandbox|--isolated)
+            SANDBOX_MODE=true
+            echo "🔒 Running in SANDBOX mode: host caches and stored credentials disabled."
+            shift
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Run 'ocd --help' for usage." >&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# -----------------------------------------------------------------------------
+# 4. Resolve Target Workspace Directory
+# -----------------------------------------------------------------------------
+TARGET_DIR="${1:-.}"
+if [ -d "$TARGET_DIR" ]; then
+    WORKSPACE_DIR="$(cd "$TARGET_DIR" && pwd -P)"
+    [ $# -gt 0 ] && shift
+else
+    echo "Error: Directory '$TARGET_DIR' does not exist." >&2
+    exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# 5. Validate GitHub App Configuration & Private Key
+# -----------------------------------------------------------------------------
+if [ -z "$GH_APP_ID" ] || [ "$GH_APP_ID" = "YOUR_APP_ID" ] || \
+   [ -z "$GH_INSTALLATION_ID" ] || [ "$GH_INSTALLATION_ID" = "YOUR_INSTALLATION_ID" ]; then
+    echo "Error: GitHub App configuration is missing." >&2
+    echo "Please set GH_APP_ID and GH_INSTALLATION_ID in $SCRIPT_DIR/.env" >&2
+    echo "See $SCRIPT_DIR/.env.example for guidance." >&2
+    exit 1
+fi
+
+if [ ! -f "$BOT_KEY_PATH" ]; then
+    echo "Error: GitHub App private key not found at '$BOT_KEY_PATH'" >&2
+    exit 1
+fi
+chmod 600 "$BOT_KEY_PATH" 2>/dev/null || true
+
+# -----------------------------------------------------------------------------
+# 6. Host-Side Token Minting (OpenSSL + curl + python3)
+# -----------------------------------------------------------------------------
+mint_gh_token() {
+    local now
+    now=$(date +%s)
+    local iat=$((now - 60))
+    local exp=$((now + 540))
+
+    local b64enc="openssl base64 -e -A | tr '+/' '-_' | tr -d '='"
+    local header
+    header=$(printf '{"alg":"RS256","typ":"JWT"}' | eval "$b64enc")
+    local payload
+    payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$iat" "$exp" "$GH_APP_ID" | eval "$b64enc")
+    local sig
+    sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$BOT_KEY_PATH" | eval "$b64enc")
+    local jwt="${header}.${payload}.${sig}"
+
+    curl -sf -X POST \
+        -H "Authorization: Bearer $jwt" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/app/installations/${GH_INSTALLATION_ID}/access_tokens" \
+        | python3 -c "import sys, json; print(json.load(sys.stdin)['token'])" 2>/dev/null
+}
+
+mint_with_retry() {
+    local max_attempts="${1:-3}"
+    local delay="${2:-3}"
+    local attempt=1
+    local token=""
+    while [ "$attempt" -le "$max_attempts" ]; do
+        token=$(mint_gh_token || true)
+        if [ -n "$token" ] && [ "$token" != "null" ]; then
+            echo "$token"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -le "$max_attempts" ] && sleep "$delay"
+    done
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+# 7. Create Ephemeral Token File & Resilient Background Refresher
+# -----------------------------------------------------------------------------
+TOKEN_FILE=$(mktemp "${TMPDIR:-/tmp}/opencode_token.XXXXXX")
+chmod 600 "$TOKEN_FILE"
+
+INITIAL_TOKEN=$(mint_with_retry 3 2)
+if [ -z "$INITIAL_TOKEN" ] || [ "$INITIAL_TOKEN" = "null" ]; then
+    echo "Error: Failed to mint GitHub installation token after retries." >&2
+    rm -f "$TOKEN_FILE"
+    exit 1
+fi
+echo "$INITIAL_TOKEN" > "$TOKEN_FILE"
+
+# Refresher subshell: checks parent PID liveness every 30s; refreshes every 45m (90 * 30s)
+PARENT_PID=$$
+(
+    while [ -f "$TOKEN_FILE" ]; do
+        for _ in $(seq 1 90); do
+            sleep 30
+            # Parent process liveness check: terminate immediately if parent died
+            if ! kill -0 "$PARENT_PID" 2>/dev/null; then
+                break 2
+            fi
+            if [ ! -f "$TOKEN_FILE" ]; then
+                break 2
+            fi
+        done
+
+        # Attempt token refresh with exponential retry
+        new_token=$(mint_with_retry 3 5 2>/dev/null || true)
+        if [ -n "$new_token" ] && [ "$new_token" != "null" ]; then
+            tmp_token="${TOKEN_FILE}.tmp.$$"
+            echo "$new_token" > "$tmp_token"
+            chmod 600 "$tmp_token"
+            mv -f "$tmp_token" "$TOKEN_FILE"
+        fi
+    done
+) &
+REFRESH_PID=$!
+
+cleanup() {
+    local exit_code=$?
+    if [ -n "${REFRESH_PID:-}" ] && kill -0 "$REFRESH_PID" 2>/dev/null; then
+        kill "$REFRESH_PID" 2>/dev/null || true
+        wait "$REFRESH_PID" 2>/dev/null || true
+    fi
+    rm -f "$TOKEN_FILE" "${TOKEN_FILE}.tmp"* 2>/dev/null || true
+    exit "$exit_code"
+}
+trap cleanup EXIT INT TERM HUP
+
+# -----------------------------------------------------------------------------
+# 8. Assemble Mounts & Environment Variables
+# -----------------------------------------------------------------------------
+mounts=(
+    -v "$WORKSPACE_DIR":/workspace
+    -v "$TOKEN_FILE":/run/secrets/github_token:ro
+)
+
+if [ -f "$ENTRYPOINT_SCRIPT" ]; then
+    mounts+=(-v "$ENTRYPOINT_SCRIPT":/usr/local/bin/docker-entrypoint.sh:ro)
+fi
+
+env_args=(
+    -e GIT_AUTHOR_NAME="$BOT_NAME"
+    -e GIT_AUTHOR_EMAIL="$BOT_EMAIL"
+    -e GIT_COMMITTER_NAME="$BOT_NAME"
+    -e GIT_COMMITTER_EMAIL="$BOT_EMAIL"
+    ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"}
+    ${OPENAI_API_KEY:+-e OPENAI_API_KEY="$OPENAI_API_KEY"}
+    ${GEMINI_API_KEY:+-e GEMINI_API_KEY="$GEMINI_API_KEY"}
+    ${OPENROUTER_API_KEY:+-e OPENROUTER_API_KEY="$OPENROUTER_API_KEY"}
+    ${DEEPSEEK_API_KEY:+-e DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY"}
+    ${GROQ_API_KEY:+-e GROQ_API_KEY="$GROQ_API_KEY"}
+    ${MISTRAL_API_KEY:+-e MISTRAL_API_KEY="$MISTRAL_API_KEY"}
+    ${OLLAMA_API_BASE:+-e OLLAMA_API_BASE="$OLLAMA_API_BASE"}
+    ${OPENAI_API_BASE:+-e OPENAI_API_BASE="$OPENAI_API_BASE"}
+)
+
+if [ "$SANDBOX_MODE" = false ]; then
+    # 1. SHARED: Global settings, commands, MCP servers & model preferences
+    mkdir -p "$DATA_ROOT/global"/{config,state}
+    mounts+=(
+        -v "$DATA_ROOT/global/config":/home/opencode/.config/opencode
+        -v "$DATA_ROOT/global/state":/home/opencode/.local/state/opencode
+    )
+
+    # 2. ISOLATED: Caches and session histories scoped strictly to this repository
+    project_name=$(basename "$WORKSPACE_DIR")
+    project_hash=$(python3 -c "import hashlib; print(hashlib.md5('''$WORKSPACE_DIR'''.encode()).hexdigest()[:8])" 2>/dev/null || printf '%s' "$WORKSPACE_DIR" | md5sum 2>/dev/null | cut -c1-8 || printf '%s' "$WORKSPACE_DIR" | md5 2>/dev/null | cut -c1-8)
+    project_id="${project_name}-${project_hash}"
+    project_data="$DATA_ROOT/projects/$project_id"
+
+    mkdir -p "$project_data"/{cache,go,share}
+    mounts+=(
+        -v "$project_data/cache":/home/opencode/.cache
+        -v "$project_data/go":/home/opencode/go
+        -v "$project_data/share":/home/opencode/.local/share/opencode
+    )
+fi
+
+# -----------------------------------------------------------------------------
+# 9. Build Image Automatically on First Run
+# -----------------------------------------------------------------------------
+if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    echo "Building $IMAGE_NAME..."
+    docker build \
+        --build-arg USER_UID="$(id -u)" \
+        --build-arg USER_GID="$(id -g)" \
+        -t "$IMAGE_NAME" -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
+fi
+
+# -----------------------------------------------------------------------------
+# 10. Launch Container
+# -----------------------------------------------------------------------------
+echo "Launching OpenCode in: $WORKSPACE_DIR (as $BOT_NAME)"
+docker run -it --rm \
+    --init \
+    --security-opt=no-new-privileges:true \
+    --pids-limit 1024 \
+    "${mounts[@]}" \
+    "${env_args[@]}" \
+    --workdir /workspace \
+    "$IMAGE_NAME" "$@"
 ```
 
 ---
@@ -460,6 +613,12 @@ GitHub App installation tokens expire after **60 minutes**.
 * **Resource Exhaustion & Fork-Bomb Protection (`--pids-limit 1024`):** Limits maximum concurrent processes to 1024, preventing rogue scripts, runaway thread pools, or fork-bombs from freezing the host system.
 * **Zombie Process Reaping (`--init`):** Uses Docker's tiny init system (`tini`) to handle process signaling and automatically reap orphaned/zombie processes left behind by compilers, linters, or test runners.
 
+### 7. Resilient Host Token Refresher & Shell Process Isolation
+* **Shell Signal Safety:** Defining cleanup traps inside an interactive shell profile (`~/.zshrc`) risks overriding interactive terminal traps or leaking background jobs. Moving `ocd` to a dedicated executable script ensures all signals (`EXIT`, `INT`, `TERM`, `HUP`) are isolated to its own subshell.
+* **Parent Process Liveness Detection:** Instead of an un-interruptible 45-minute sleep, the background refresher loop polls every 30 seconds checking `kill -0 "$PARENT_PID"`. If the terminal window is abruptly closed or killed, the background subshell terminates immediately, leaving zero orphaned processes.
+* **Transient Network Retry:** Token renewal uses exponential retry with backoff (`mint_with_retry`), ensuring temporary WiFi or GitHub API drops do not invalidate active coding sessions.
+* **Atomic Credential Writes:** Refreshed tokens are written to a PID-tagged temporary file before being atomically replaced via `mv`, preventing race conditions where the container reads a partially written token.
+
 ---
 
 ## Daily Usage & Device Migration
@@ -470,4 +629,4 @@ GitHub App installation tokens expire after **60 minutes**.
 * **Rebuild image to update dependencies:** `ocd --rebuild`
 * **Clear cache for a specific repo:** `rm -rf ~/opencode-docker/data/projects/<project-id>/cache`
 * **Clear chat history for a specific repo:** `rm -rf ~/opencode-docker/data/projects/<project-id>/share`
-* **Migrate to a new machine:** Copy the single `~/opencode-docker` folder to your new machine, add the `ocd` function to your `~/.zshrc` or `~/.bashrc`, and run `ocd`. All chat histories, keys, and configurations will be immediately available.
+* **Migrate to a new machine:** Clone or copy `~/opencode-docker` to your new machine, copy your `app.pem` and `.env`, run `chmod +x ocd && ln -sf ~/opencode-docker/ocd ~/.local/bin/ocd`, and run `ocd`. All chat histories, keys, and configurations will be immediately available.
