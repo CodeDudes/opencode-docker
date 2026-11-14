@@ -12,7 +12,7 @@ Running an autonomous coding agent directly on your host machine gives it access
 | **Zero Personal Credentials** | Replaces personal SSH keys (`~/.ssh`) and personal access tokens with a dedicated **GitHub App**. | Scopes access strictly to authorized repositories and specific permissions. All commits and PRs are clearly audited under `your-app[bot]`. |
 | **Short-Lived Ephemeral Tokens** | Mints 1-hour GitHub installation tokens via a 9-minute RS256 JWT; refreshed by the host every 45 minutes. | Eliminates long-lived static tokens. If a token is leaked in logs, it expires within an hour. |
 | **Zero Private Key Exposure** | Keeps `app.pem` strictly on the host. Mounts only an ephemeral token to `/run/secrets/github_token:ro`. | Prevents the GitHub App private key from being stolen by prompt injection, malicious packages, or agent tools. |
-| **Non-Root Execution** | Drops root via `su-exec` to an `opencode` user mapped to the host's exact UID/GID. | Eliminates container breakout blast radius and prevents `root:root` file ownership issues on Linux. |
+| **Non-Root Execution** | Container runs natively as non-root user `opencode` (UID 1000). | Eliminates container breakout blast radius and ensures seamless file ownership on host. |
 | **Runtime Hardening** | `--security-opt=no-new-privileges:true` and `--pids-limit 1024`. | Blocks SUID privilege escalation and protects host against fork-bombs / resource starvation. |
 
 ---
@@ -64,7 +64,7 @@ FROM ghcr.io/anomalyco/opencode:latest
 
 USER root
 
-# Install development toolchains, utilities, and su-exec for privilege dropping from stable repositories
+# Install development toolchains and utilities from stable repositories
 RUN apk add --no-cache \
     git \
     github-cli \
@@ -81,22 +81,24 @@ RUN apk add --no-cache \
     jq \
     openssl \
     build-base \
-    ca-certificates \
-    su-exec \
-    shadow
+    ca-certificates
 
-# Create non-root opencode user and configure environment
+# Create non-root opencode user (UID 1000)
 RUN addgroup -g 1000 opencode && \
     adduser -u 1000 -G opencode -s /bin/bash -D opencode && \
-    mkdir -p /home/opencode/go && \
-    chown -R opencode:opencode /home/opencode
+    mkdir -p /home/opencode/go /workspace && \
+    chown -R opencode:opencode /home/opencode /workspace
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+USER opencode
 
 ENV HOME="/home/opencode"
 ENV GOPATH="/home/opencode/go"
 ENV PATH="/home/opencode/go/bin:${PATH}"
 
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 ```
@@ -131,24 +133,6 @@ Create `~/opencode-docker/docker-entrypoint.sh`:
 set -e
 
 TOKEN_FILE="/run/secrets/github_token"
-USER_NAME="opencode"
-USER_HOME="/home/opencode"
-
-# 1. Match host user UID and GID if /workspace is mounted
-if [ -d "/workspace" ]; then
-    WORKSPACE_UID=$(stat -c '%u' /workspace 2>/dev/null || stat -f '%u' /workspace 2>/dev/null || echo 0)
-    WORKSPACE_GID=$(stat -c '%g' /workspace 2>/dev/null || stat -f '%g' /workspace 2>/dev/null || echo 0)
-
-    # If workspace is owned by a non-root host user, match opencode's UID/GID
-    if [ "$WORKSPACE_UID" -ne 0 ] && [ "$WORKSPACE_UID" -ne "$(id -u $USER_NAME)" ]; then
-        groupmod -o -g "$WORKSPACE_GID" "$USER_NAME" 2>/dev/null || true
-        usermod -o -u "$WORKSPACE_UID" "$USER_NAME" 2>/dev/null || true
-    fi
-fi
-
-# Ensure user owns top-level home directories without slow recursive traversal
-mkdir -p "$USER_HOME"/{.config,.local,.cache,go} 2>/dev/null || true
-chown "$USER_NAME:$USER_NAME" "$USER_HOME" "$USER_HOME"/{.config,.local,.cache,go} 2>/dev/null || true
 
 get_current_token() {
     if [ -f "$TOKEN_FILE" ]; then
@@ -166,39 +150,37 @@ apply_token() {
         return 0
     fi
 
-    # 1. Update Git credential store for opencode user
-    echo "https://x-access-token:${token}@github.com" > "${USER_HOME}/.git-credentials"
-    chmod 600 "${USER_HOME}/.git-credentials"
-    chown "$USER_NAME:$USER_NAME" "${USER_HOME}/.git-credentials"
+    # 1. Update Git credential store
+    echo "https://x-access-token:${token}@github.com" > "${HOME}/.git-credentials"
+    chmod 600 "${HOME}/.git-credentials"
 
     # 2. Update GitHub CLI (gh) configuration
-    mkdir -p "${USER_HOME}/.config/gh"
-    cat << YAML > "${USER_HOME}/.config/gh/hosts.yml"
+    mkdir -p "${HOME}/.config/gh"
+    cat << YAML > "${HOME}/.config/gh/hosts.yml"
 github.com:
     oauth_token: ${token}
     user: ${GIT_AUTHOR_NAME:-opencode-bot}
     git_protocol: https
 YAML
-    chown -R "$USER_NAME:$USER_NAME" "${USER_HOME}/.config"
 }
 
-# 2. Configure Git globals for the opencode user
-su-exec "$USER_NAME" git config --global --add safe.directory /workspace
-su-exec "$USER_NAME" git config --global credential.helper "store --file ${USER_HOME}/.git-credentials"
-su-exec "$USER_NAME" git config --global url."https://github.com/".insteadOf "git@github.com:"
-su-exec "$USER_NAME" git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+# 1. Configure Git globals
+git config --global --add safe.directory /workspace
+git config --global credential.helper "store --file ${HOME}/.git-credentials"
+git config --global url."https://github.com/".insteadOf "git@github.com:"
+git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
 
-# 3. Apply initial token
+# 2. Apply initial token
 apply_token
 
-# 4. If a token file is mounted, watch for updates from host in background
+# 3. If a token file is mounted, watch for updates from host in background
 if [ -f "$TOKEN_FILE" ]; then
     (
         last_token="$(get_current_token)"
         while true; do
             sleep 30
             curr_token="$(get_current_token)"
-            if [ "$curr_token" != "$last_token" ]; then
+            if [ -n "$curr_token" ] && [ "$curr_token" != "$last_token" ]; then
                 apply_token
                 last_token="$curr_token"
             fi
@@ -206,11 +188,11 @@ if [ -f "$TOKEN_FILE" ]; then
     ) &
 fi
 
-# 5. Drop root privileges and hand over to opencode (or shell if specified)
+# 4. Hand over to opencode (or shell if specified)
 if [ "$1" = "bash" ] || [ "$1" = "sh" ]; then
-    exec su-exec "$USER_NAME" "$@"
+    exec "$@"
 else
-    exec su-exec "$USER_NAME" opencode "$@"
+    exec opencode "$@"
 fi
 ```
 
@@ -449,9 +431,9 @@ GitHub App installation tokens expire after **60 minutes**.
 * POSIX-compatible shell code runs identically in both `zsh` and `bash`.
 * Dynamic path detection works with both BSD and GNU coreutils.
 
-### 5. Non-Root Execution & Dynamic Host UID/GID Mapping
-* **Blast Radius Reduction:** Autonomous coding agents execute untrusted scripts and test suites. Running as non-root ensures agents cannot alter container system binaries or exploit root-only container breakout vectors.
-* **Zero Linux File Permission Conflicts:** On Linux, Docker processes share the host kernel. The entrypoint inspects `/workspace` at startup and maps the `opencode` user to your host user's exact numeric UID and GID before dropping privileges via `su-exec`. Every file, directory, or Git commit created in `/workspace` is owned by your host user account—never `root:root`.
+### 5. Native Non-Root Execution
+* **Blast Radius Reduction:** Autonomous coding agents execute untrusted scripts and test suites. Running natively as non-root (`opencode`, UID 1000) ensures agents cannot alter container system binaries or exploit root-only container breakout vectors.
+* **Instant Startup & Zero File Ownership Conflicts:** The container runs directly as UID 1000 from the start, requiring no root transitions, no `su-exec`, and no startup directory crawling. On macOS (via VM translation) and Linux (standard UID 1000 desktop installs), files and Git commits created in `/workspace` are owned directly by your host user account—never `root:root`.
 * **Strict Package Philosophy:** The container intentionally omits `sudo`. Developer packages (`npm`, `pnpm`, `uv pip`, `go install`) install freely into user/workspace paths without root. If a new OS-level utility (e.g. `ffmpeg`, `ripgrep`) is needed, add it to `Dockerfile` and run `ocd --rebuild` to keep your environment reproducible and auditable.
 
 ### 6. Container Runtime Hardening & Stable Builds
