@@ -12,7 +12,7 @@ Running an autonomous coding agent directly on your host machine gives it access
 | **Zero Personal Credentials** | Replaces personal SSH keys (`~/.ssh`) and personal access tokens with a dedicated **GitHub App**. | Scopes access strictly to authorized repositories and specific permissions. All commits and PRs are clearly audited under `your-app[bot]`. |
 | **Short-Lived Ephemeral Tokens** | Mints 1-hour GitHub installation tokens via a 9-minute RS256 JWT; refreshed by the host every 45 minutes. | Eliminates long-lived static tokens. If a token is leaked in logs, it expires within an hour. |
 | **Zero Private Key Exposure** | Keeps `app.pem` strictly on the host. Mounts only an ephemeral token to `/run/secrets/github_token:ro`. | Prevents the GitHub App private key from being stolen by prompt injection, malicious packages, or agent tools. |
-| **Non-Root Execution** | Container runs natively as non-root user `opencode` (UID 1000). | Eliminates container breakout blast radius and ensures seamless file ownership on host. |
+| **Non-Root Execution** | Container runs natively as non-root user `opencode` (matching host UID/GID at build time). | Eliminates container breakout blast radius and ensures seamless file ownership on macOS and Linux. |
 | **Runtime Hardening** | `--security-opt=no-new-privileges:true` and `--pids-limit 1024`. | Blocks SUID privilege escalation and protects host against fork-bombs / resource starvation. |
 
 ---
@@ -83,11 +83,22 @@ RUN apk add --no-cache \
     build-base \
     ca-certificates
 
-# Create non-root opencode user (UID 1000)
-RUN addgroup -g 1000 opencode && \
-    adduser -u 1000 -G opencode -s /bin/bash -D opencode && \
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+# Create non-root opencode user matching build-time UID/GID
+RUN GROUP_NAME=$(getent group ${USER_GID} | cut -d: -f1) && \
+    if [ -z "$GROUP_NAME" ]; then \
+        addgroup -g ${USER_GID} opencode; \
+        GROUP_NAME="opencode"; \
+    fi && \
+    USER_NAME=$(getent passwd ${USER_UID} | cut -d: -f1) && \
+    if [ -z "$USER_NAME" ]; then \
+        adduser -u ${USER_UID} -G "$GROUP_NAME" -s /bin/bash -D opencode; \
+        USER_NAME="opencode"; \
+    fi && \
     mkdir -p /home/opencode/go /workspace && \
-    chown -R opencode:opencode /home/opencode /workspace
+    chown -R ${USER_UID}:${USER_GID} /home/opencode /workspace
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
@@ -230,7 +241,10 @@ ocd () {
 		case "$1" in
 			--rebuild)
 				echo "Rebuilding $image_name..."
-				docker build --pull -t "$image_name" -f "$dockerfile_dir/Dockerfile" "$dockerfile_dir" || return 1
+				docker build --pull \
+					--build-arg USER_UID="$(id -u)" \
+					--build-arg USER_GID="$(id -g)" \
+					-t "$image_name" -f "$dockerfile_dir/Dockerfile" "$dockerfile_dir" || return 1
 				shift
 				;;
 			--sandbox|--isolated)
@@ -365,7 +379,10 @@ ocd () {
 	# 8. Build image automatically on first run
 	if ! docker image inspect "$image_name" >/dev/null 2>&1; then
 		echo "Building $image_name..."
-		docker build -t "$image_name" -f "$dockerfile_dir/Dockerfile" "$dockerfile_dir" || { cleanup; return 1; }
+		docker build \
+			--build-arg USER_UID="$(id -u)" \
+			--build-arg USER_GID="$(id -g)" \
+			-t "$image_name" -f "$dockerfile_dir/Dockerfile" "$dockerfile_dir" || { cleanup; return 1; }
 	fi
 
 	echo "Launching OpenCode in: $absolute_path (as $bot_name)"
@@ -433,7 +450,7 @@ GitHub App installation tokens expire after **60 minutes**.
 
 ### 5. Native Non-Root Execution
 * **Blast Radius Reduction:** Autonomous coding agents execute untrusted scripts and test suites. Running natively as non-root (`opencode`, UID 1000) ensures agents cannot alter container system binaries or exploit root-only container breakout vectors.
-* **Instant Startup & Zero File Ownership Conflicts:** The container runs directly as UID 1000 from the start, requiring no root transitions, no `su-exec`, and no startup directory crawling. On macOS (via VM translation) and Linux (standard UID 1000 desktop installs), files and Git commits created in `/workspace` are owned directly by your host user account—never `root:root`.
+* **Instant Startup & Zero File Ownership Conflicts:** The container runs directly as the non-root user matching your host UID/GID (passed via build args `USER_UID` and `USER_GID` defaulting to 1000). On macOS (via VM translation) and Linux (matching host UID directly, whether 1000 or custom), files and Git commits created in `/workspace` are owned directly by your host user account—never `root:root`. No root transitions, no runtime `su-exec`, and no startup directory crawling.
 * **Strict Package Philosophy:** The container intentionally omits `sudo`. Developer packages (`npm`, `pnpm`, `uv pip`, `go install`) install freely into user/workspace paths without root. If a new OS-level utility (e.g. `ffmpeg`, `ripgrep`) is needed, add it to `Dockerfile` and run `ocd --rebuild` to keep your environment reproducible and auditable.
 
 ### 6. Container Runtime Hardening & Stable Builds
