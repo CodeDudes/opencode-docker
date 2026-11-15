@@ -40,25 +40,77 @@ Create a dedicated GitHub App in your GitHub Organization or personal account se
 
 ---
 
-### 2. Set Up the Repository Directory on Your Machine
-All build files, private keys, and runtime caches are consolidated directly inside `~/opencode-docker`:
+### 2. Clone the Repository & Configure Credentials
+All scripts, Docker configurations, and environment templates are pre-packaged in the repository. Clone it to `~/opencode-docker`:
 
 ```bash
-mkdir -p ~/opencode-docker/data/global/{config,state}
-mkdir -p ~/opencode-docker/data/projects
+git clone https://github.com/CodeDudes/opencode-docker.git ~/opencode-docker
+cd ~/opencode-docker
 ```
 
-Move your downloaded GitHub App private key into `~/opencode-docker/app.pem` and restrict its permissions to owner-read-only:
+1. **Configure your `.env` file:** Copy `.env.example` to `.env`:
+   ```bash
+   cp .env.example .env
+   ```
+   Open `~/opencode-docker/.env` and fill in your GitHub App credentials and optional API keys:
+   ```dotenv
+   # GitHub App Configuration (Required)
+   GH_APP_ID="YOUR_APP_ID"
+   GH_INSTALLATION_ID="YOUR_INSTALLATION_ID"
+   GH_APP_SLUG="your-org-opencode-bot"
 
-```bash
-mv ~/Downloads/your-downloaded-key.pem ~/opencode-docker/app.pem
-chmod 600 ~/opencode-docker/app.pem
-```
+   # Optional LLM API keys:
+   ANTHROPIC_API_KEY="sk-ant-..."
+   OPENAI_API_KEY="sk-..."
+   GEMINI_API_KEY="AIzaSy..."
+   ```
+   *(Note: `.env` is automatically ignored by `.gitignore` and `.dockerignore` so secrets are never committed or transferred into Docker layers).*
+
+2. **Place your private key (`app.pem`):** Move your downloaded GitHub App private key into `~/opencode-docker/app.pem` and restrict permissions to owner-read-only:
+   ```bash
+   mv ~/Downloads/your-downloaded-key.pem ~/opencode-docker/app.pem
+   chmod 600 ~/opencode-docker/app.pem
+   ```
 
 ---
 
-### 3. Create the Dockerfile
-Installs toolchains without baking secrets into image layers. Create `~/opencode-docker/Dockerfile`:
+### 3. Add the `ocd` Alias to Your Shell
+Make `ocd` executable and add the alias to your `~/.zshrc` (macOS) or `~/.bashrc` (Linux):
+
+```bash
+chmod +x ~/opencode-docker/ocd
+
+# On macOS (zsh):
+echo 'alias ocd="$HOME/opencode-docker/ocd"' >> ~/.zshrc
+source ~/.zshrc
+
+# On Linux (bash):
+echo 'alias ocd="$HOME/opencode-docker/ocd"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+*(Alternatively, you can symlink `~/opencode-docker/ocd` into `~/.local/bin/ocd` or `/usr/local/bin/ocd` if preferred).*
+
+---
+
+### 4. Launch OpenCode
+```bash
+# Launch in the current repository:
+ocd
+
+# Or launch in a specific repository:
+ocd ~/projects/my-repo
+```
+*On your first launch, `ocd` automatically builds the Docker image tailored to your host UID/GID, mints your ephemeral GitHub token, and drops you into the OpenCode interactive agent interface.*
+
+---
+
+## Architectural Deep Dive & Implementation
+
+For developers and security teams who want to inspect the exact mechanics or adapt this architecture, here is a complete walkthrough of how each component is constructed:
+
+### 1. The Production `Dockerfile` (`~/opencode-docker/Dockerfile`)
+The Dockerfile installs development toolchains from stable Alpine repositories, maps host user UID/GID at build time, and enforces native non-root execution (`USER opencode`):
 
 ```dockerfile
 FROM ghcr.io/anomalyco/opencode:latest
@@ -117,8 +169,8 @@ ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 ---
 
-### 4. Create .dockerignore (Build Context Protection)
-Prevents secrets, keys, and caches from being transferred to the Docker daemon during `docker build`. Create `~/opencode-docker/.dockerignore`:
+### 2. Build Context Shielding (`~/opencode-docker/.dockerignore`)
+Without `.dockerignore`, `docker build` transfers the entire directory (including `app.pem`, `data/` caches, and `.git/` history) to the Docker daemon. This file guarantees that private keys and session histories never touch Docker image layers:
 
 ```dockerignore
 # Exclude secrets and private keys
@@ -139,8 +191,8 @@ data/
 
 ---
 
-### 5. Create the Unified Entrypoint Script
-Create `~/opencode-docker/docker-entrypoint.sh`:
+### 3. The Unified Container Entrypoint (`~/opencode-docker/docker-entrypoint.sh`)
+The entrypoint script runs inside the container as the non-root `opencode` user. It mounts the ephemeral token, configures Git credentials, establishes safe directory trust, transparently rewrites SSH URLs to HTTPS, and delegates execution:
 
 ```bash
 #!/usr/bin/env bash
@@ -225,61 +277,19 @@ else
 fi
 ```
 
-Make the script executable:
-
-```bash
-chmod +x ~/opencode-docker/docker-entrypoint.sh
-```
-
 ---
 
-### 6. Configure Environment (`.env`) & Install `ocd` CLI
+### 4. The Resilient `ocd` Host CLI Launcher (`~/opencode-docker/ocd`)
+The host-side `ocd` script coordinates host secret isolation, RS256 JWT minting, background token rotation, and container lifecycle.
 
-Instead of copy-pasting a 150-line shell function into your profile, OpenCode Docker provides a standalone executable CLI (`ocd`) and a `.env` configuration template.
+Key design highlights:
+* **Shell Trap Isolation:** Scoped to its own subshell so `trap cleanup EXIT INT TERM HUP` never interferes with the user's interactive terminal session.
+* **Parent PID Liveness Polling:** The background refresher sleeps in 30-second intervals checking `kill -0 "$PARENT_PID"`, ensuring zero orphaned background jobs if the terminal is killed.
+* **Intelligent API Error Diagnostics:** Inspects HTTP status codes on token minting failure (providing specific guidance for 401, 403, and 404 errors) and fast-aborts fatal errors without slow retries.
+* **Dynamic TTY Detection:** Passes `-it` for interactive shells, `-i` for piped commands, or runs headless in CI/CD without TTY errors.
 
-#### Step A: Configure your `.env` file
-Copy `.env.example` to `.env` inside `~/opencode-docker/`:
-
-```bash
-cp ~/opencode-docker/.env.example ~/opencode-docker/.env
-```
-
-Edit `~/opencode-docker/.env` with your GitHub App credentials and API keys:
-
-```dotenv
-# GitHub App Configuration
-GH_APP_ID="YOUR_APP_ID"
-GH_INSTALLATION_ID="YOUR_INSTALLATION_ID"
-GH_APP_SLUG="your-org-opencode-bot"
-
-# Optional LLM API keys:
-ANTHROPIC_API_KEY="sk-ant-..."
-OPENAI_API_KEY="sk-..."
-GEMINI_API_KEY="AIzaSy..."
-```
-
-*(Note: `.env` is ignored by `.gitignore` and `.dockerignore` so secrets are never committed or transferred to the Docker daemon).*
-
-#### Step B: Add the `ocd` Alias to your Shell
-
-Make `ocd` executable and add the alias to your `~/.zshrc` (macOS) or `~/.bashrc` (Linux):
-
-```bash
-chmod +x ~/opencode-docker/ocd
-
-# On macOS (zsh):
-echo 'alias ocd="$HOME/opencode-docker/ocd"' >> ~/.zshrc
-source ~/.zshrc
-
-# On Linux (bash):
-echo 'alias ocd="$HOME/opencode-docker/ocd"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-*(Alternatively, you can symlink `~/opencode-docker/ocd` into `~/.local/bin/ocd` or `/usr/local/bin/ocd` if preferred).*
-
-#### Step C: The Standalone `ocd` CLI Script (`~/opencode-docker/ocd`)
-The complete source of `~/opencode-docker/ocd`:
+<details>
+<summary><b>Click to expand the full source code of <code>~/opencode-docker/ocd</code> (300 lines)</b></summary>
 
 ```bash
 #!/usr/bin/env bash
@@ -630,6 +640,8 @@ docker run "${docker_tty_args[@]}" --rm \
     --workdir /workspace \
     "$IMAGE_NAME" "$@"
 ```
+
+</details>
 
 ---
 
