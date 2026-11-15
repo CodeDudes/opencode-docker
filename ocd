@@ -292,12 +292,30 @@ env_args=(
     ${OPENAI_API_BASE:+-e OPENAI_API_BASE="$OPENAI_API_BASE"}
 )
 
+# Forward dynamic MCP_* variables and common external tool keys
+for var in $(compgen -v | grep '^MCP_' || true); do
+    env_args+=(-e "$var=${!var}")
+done
+for var in BRAVE_API_KEY TAVILY_API_KEY DATABASE_URL POSTGRES_URL; do
+    if [ -n "${!var:-}" ]; then
+        env_args+=(-e "$var=${!var}")
+    fi
+done
+
 if [ "$SANDBOX_MODE" = false ]; then
-    # 1. SHARED: Global settings, commands, MCP servers & model preferences
-    mkdir -p "$DATA_ROOT/global"/{config,state}
+    # 1. SHARED: Global settings, commands, MCP servers, skills & npm cache
+    mkdir -p "$DATA_ROOT/global"/{config,state,cache/npm}
+
+    # Seed starter config (MCP servers, skills, commands) if not already present
+    if [ ! -f "$DATA_ROOT/global/config/opencode.json" ] && [ -d "$SCRIPT_DIR/config.example" ]; then
+        mkdir -p "$DATA_ROOT/global/config"
+        cp -R "$SCRIPT_DIR/config.example/"* "$DATA_ROOT/global/config/" 2>/dev/null || true
+    fi
+
     mounts+=(
         -v "$DATA_ROOT/global/config":/home/opencode/.config/opencode
         -v "$DATA_ROOT/global/state":/home/opencode/.local/state/opencode
+        -v "$DATA_ROOT/global/cache/npm":/home/opencode/.npm
     )
 
     # 2. ISOLATED: Caches and session histories scoped strictly to this repository

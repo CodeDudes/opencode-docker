@@ -105,16 +105,61 @@ All runtime data is consolidated inside `~/opencode-docker/data/` (automatically
 ```
 ~/opencode-docker/data/
 ├── global/                         <-- Shared across all repositories
-│   ├── config/                     <-- opencode.json, custom commands, MCP servers
-│   └── state/                      <-- model.json, preferred LLM preferences
+│   ├── config/                     <-- opencode.json, custom commands, MCP servers, skills
+│   ├── state/                      <-- model.json, preferred LLM preferences
+│   └── cache/npm/                  <-- Global npm cache for npx MCP tools & plugins
 └── projects/                       <-- Scoped strictly per-repository
     └── <repo-name>-<hash>/
-        ├── cache/                  <-- Isolated pip, uv, npm caches (prevents cross-repo cache poisoning)
+        ├── cache/                  <-- Isolated pip, uv caches (prevents cross-repo cache poisoning)
         ├── go/                     <-- Isolated Go module caches and binaries
         └── share/                  <-- Scoped SQLite conversation histories
 ```
 
 * **Sandbox Mode (`--sandbox`):** Disables all project persistent mounts, running an ephemeral session that leaves zero trace on your machine when exited.
+
+---
+
+## Extending OpenCode: MCP Servers & Skills
+
+`ocd` provides first-class support for **Model Context Protocol (MCP)** tools, modular **Skills**, and custom **Slash Commands**. On your first run, starter templates from `config.example/` are automatically seeded into `~/opencode-docker/data/global/config/`.
+
+### 1. Model Context Protocol (MCP) Servers
+Configure MCP servers in `~/opencode-docker/data/global/config/opencode.json` (or in `<repo>/opencode.json` for repository-specific tools):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "fetch": {
+      "command": ["uvx", "mcp-server-fetch"],
+      "enabled": true
+    },
+    "filesystem": {
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+      "enabled": false
+    },
+    "brave-search": {
+      "command": ["npx", "-y", "@modelcontextprotocol/server-brave-search"],
+      "enabled": false,
+      "env": {
+        "BRAVE_API_KEY": "{env:BRAVE_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+* **Dynamic Environment Variables:** Any variable defined in `.env` starting with `MCP_*` (plus `BRAVE_API_KEY`, `TAVILY_API_KEY`, and `DATABASE_URL`) is automatically forwarded into the container.
+* **Instant Startup:** The `~/.npm` directory is persisted under `data/global/cache/npm`, ensuring `npx` MCP servers launch in milliseconds without re-downloading packages.
+
+### 2. Skills (On-Demand Knowledge Injection)
+Skills are modular markdown instructions that OpenCode dynamically loads when your prompt requires them:
+* **Global Skills:** Place in `~/opencode-docker/data/global/config/skills/<skill-name>/SKILL.md` (e.g. standard `git-workflow`).
+* **Project Skills:** Place in `<repo>/.opencode/skills/<skill-name>/SKILL.md`.
+
+### 3. Custom Commands (Slash Commands)
+Create reusable prompts and slash commands with live shell integration (`!command`):
+* Place markdown files in `~/opencode-docker/data/global/config/commands/` (e.g., `/review-pr` in `commands/review-pr.md` which inspects `!git diff --staged`).
 
 ---
 
@@ -137,6 +182,19 @@ To move your entire OpenCode setup to a new machine:
 2. Copy your `app.pem` and `.env` into `~/opencode-docker/`.
 3. (Optional) Copy `~/opencode-docker/data/global/` to preserve your custom commands and model preferences.
 4. Make `ocd` executable (`chmod +x ocd`), add the alias `alias ocd="$HOME/opencode-docker/ocd"` to your shell profile, and start coding with `ocd`.
+
+---
+
+## Security Boundaries & Recommended Safeguards
+
+While `ocd` guarantees complete host machine isolation, autonomous agents with workspace write access still require codebase-level safeguards:
+* **GitHub Branch Protection:** Enforce PR reviews and block direct pushes to `main`.
+* **Disable Force Pushes:** Ensure `Allow force pushes` is disabled in GitHub branch rulesets.
+* **Strict App Scoping:** Grant the GitHub App access only to specific target repositories.
+* **Provider Spend Limits:** Set monthly hard caps in your LLM provider dashboards to prevent runaway loops.
+* **Lockfiles:** Commit package lockfiles (`package-lock.json`, `uv.lock`, etc.) to prevent hallucinated package attacks.
+
+For a full breakdown of agent threat vectors, see [blog.md](blog.md).
 
 ---
 
