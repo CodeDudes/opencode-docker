@@ -124,6 +124,8 @@ Prevents secrets, keys, and caches from being transferred to the Docker daemon d
 # Exclude secrets and private keys
 app.pem
 *.pem
+.env
+*.env
 
 # Exclude persistent data, caches, and session history
 data/
@@ -362,7 +364,11 @@ while [ $# -gt 0 ]; do
                 --build-arg USER_UID="$(id -u)" \
                 --build-arg USER_GID="$(id -g)" \
                 -t "$IMAGE_NAME" -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
+            echo "✅ Successfully rebuilt $IMAGE_NAME."
             shift
+            if [ $# -eq 0 ]; then
+                exit 0
+            fi
             ;;
         --sandbox|--isolated)
             SANDBOX_MODE=true
@@ -568,7 +574,15 @@ fi
 # 10. Launch Container
 # -----------------------------------------------------------------------------
 echo "Launching OpenCode in: $WORKSPACE_DIR (as $BOT_NAME)"
-docker run -it --rm \
+
+docker_tty_args=()
+if [ -t 0 ] && [ -t 1 ]; then
+    docker_tty_args=(-it)
+elif [ -t 0 ]; then
+    docker_tty_args=(-i)
+fi
+
+docker run "${docker_tty_args[@]}" --rm \
     --init \
     --security-opt=no-new-privileges:true \
     --pids-limit 1024 \
