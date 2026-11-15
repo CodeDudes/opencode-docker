@@ -260,28 +260,23 @@ GEMINI_API_KEY="AIzaSy..."
 
 *(Note: `.env` is ignored by `.gitignore` and `.dockerignore` so secrets are never committed or transferred to the Docker daemon).*
 
-#### Step B: Install `ocd` to your PATH
+#### Step B: Add the `ocd` Alias to your Shell
 
-Make `ocd` executable and symlink it to your local binary path (e.g. `~/.local/bin` or `/usr/local/bin`):
+Make `ocd` executable and add the alias to your `~/.zshrc` (macOS) or `~/.bashrc` (Linux):
 
 ```bash
 chmod +x ~/opencode-docker/ocd
-mkdir -p ~/.local/bin
-ln -sf ~/opencode-docker/ocd ~/.local/bin/ocd
+
+# On macOS (zsh):
+echo 'alias ocd="$HOME/opencode-docker/ocd"' >> ~/.zshrc
+source ~/.zshrc
+
+# On Linux (bash):
+echo 'alias ocd="$HOME/opencode-docker/ocd"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
-Ensure `~/.local/bin` is in your `$PATH` (standard on modern Linux and macOS):
-
-```bash
-# Add to ~/.zshrc or ~/.bashrc if needed:
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Alternatively, you can define a one-line alias in your `~/.zshrc` / `~/.bashrc`:
-
-```bash
-alias ocd="$HOME/opencode-docker/ocd"
-```
+*(Alternatively, you can symlink `~/opencode-docker/ocd` into `~/.local/bin/ocd` or `/usr/local/bin/ocd` if preferred).*
 
 #### Step C: The Standalone `ocd` CLI Script (`~/opencode-docker/ocd`)
 The complete source of `~/opencode-docker/ocd`:
@@ -702,4 +697,4 @@ GitHub App installation tokens expire after **60 minutes**.
 * **Rebuild image to update dependencies:** `ocd --rebuild`
 * **Clear cache for a specific repo:** `rm -rf ~/opencode-docker/data/projects/<project-id>/cache`
 * **Clear chat history for a specific repo:** `rm -rf ~/opencode-docker/data/projects/<project-id>/share`
-* **Migrate to a new machine:** Clone or copy `~/opencode-docker` to your new machine, copy your `app.pem` and `.env`, run `chmod +x ocd && ln -sf ~/opencode-docker/ocd ~/.local/bin/ocd`, and run `ocd`. All chat histories, keys, and configurations will be immediately available.
+* **Migrate to a new machine:** Clone or copy `~/opencode-docker` to your new machine, copy your `app.pem` and `.env`, make `ocd` executable (`chmod +x ocd`), add the alias to your `~/.zshrc` or `~/.bashrc`, and run `ocd`. All chat histories, keys, and configurations will be immediately available.

@@ -56,14 +56,22 @@ cd ~/opencode-docker
 
 *(Need to create a GitHub App? See the [Step-by-Step GitHub App Guide](blog.md#1-create-the-github-app-and-gather-credentials) in `blog.md`).*
 
-### 3. Install the `ocd` CLI
-Make `ocd` executable and symlink it to your local binary path:
+### 3. Add the `ocd` Alias to Your Shell
+Make `ocd` executable and add the alias to your shell profile:
+
 ```bash
 chmod +x ~/opencode-docker/ocd
-mkdir -p ~/.local/bin
-ln -sf ~/opencode-docker/ocd ~/.local/bin/ocd
+
+# On macOS (zsh):
+echo 'alias ocd="$HOME/opencode-docker/ocd"' >> ~/.zshrc
+source ~/.zshrc
+
+# On Linux (bash):
+echo 'alias ocd="$HOME/opencode-docker/ocd"' >> ~/.bashrc
+source ~/.bashrc
 ```
-*(Ensure `~/.local/bin` is in your `$PATH`, or define `alias ocd="$HOME/opencode-docker/ocd"` in your `~/.zshrc` / `~/.bashrc`).*
+
+*(Alternatively, you can symlink `ocd` into `~/.local/bin` or `/usr/local/bin` if preferred).*
 
 ### 4. Launch OpenCode
 ```bash
@@ -128,7 +136,7 @@ To move your entire OpenCode setup to a new machine:
 1. Clone this repository to `~/opencode-docker`.
 2. Copy your `app.pem` and `.env` into `~/opencode-docker/`.
 3. (Optional) Copy `~/opencode-docker/data/global/` to preserve your custom commands and model preferences.
-4. Run `chmod +x ocd && ln -sf ~/opencode-docker/ocd ~/.local/bin/ocd` and start coding with `ocd`.
+4. Make `ocd` executable (`chmod +x ocd`), add the alias `alias ocd="$HOME/opencode-docker/ocd"` to your shell profile, and start coding with `ocd`.
 
 ---
 
