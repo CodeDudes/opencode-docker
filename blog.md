@@ -260,28 +260,23 @@ GEMINI_API_KEY="AIzaSy..."
 
 *(Note: `.env` is ignored by `.gitignore` and `.dockerignore` so secrets are never committed or transferred to the Docker daemon).*
 
-#### Step B: Install `ocd` to your PATH
+#### Step B: Add the `ocd` Alias to your Shell
 
-Make `ocd` executable and symlink it to your local binary path (e.g. `~/.local/bin` or `/usr/local/bin`):
+Make `ocd` executable and add the alias to your `~/.zshrc` (macOS) or `~/.bashrc` (Linux):
 
 ```bash
 chmod +x ~/opencode-docker/ocd
-mkdir -p ~/.local/bin
-ln -sf ~/opencode-docker/ocd ~/.local/bin/ocd
+
+# On macOS (zsh):
+echo 'alias ocd="$HOME/opencode-docker/ocd"' >> ~/.zshrc
+source ~/.zshrc
+
+# On Linux (bash):
+echo 'alias ocd="$HOME/opencode-docker/ocd"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
-Ensure `~/.local/bin` is in your `$PATH` (standard on modern Linux and macOS):
-
-```bash
-# Add to ~/.zshrc or ~/.bashrc if needed:
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Alternatively, you can define a one-line alias in your `~/.zshrc` / `~/.bashrc`:
-
-```bash
-alias ocd="$HOME/opencode-docker/ocd"
-```
+*(Alternatively, you can symlink `~/opencode-docker/ocd` into `~/.local/bin/ocd` or `/usr/local/bin/ocd` if preferred).*
 
 #### Step C: The Standalone `ocd` CLI Script (`~/opencode-docker/ocd`)
 The complete source of `~/opencode-docker/ocd`:
@@ -430,26 +425,70 @@ mint_gh_token() {
     local payload
     payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$iat" "$exp" "$GH_APP_ID" | eval "$b64enc")
     local sig
-    sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$BOT_KEY_PATH" | eval "$b64enc")
+    sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$BOT_KEY_PATH" 2>/dev/null | eval "$b64enc")
+    if [ -z "$sig" ]; then
+        echo "Error: Failed to sign JWT with key '$BOT_KEY_PATH'. Is it a valid RSA private key?" >&2
+        return 1
+    fi
     local jwt="${header}.${payload}.${sig}"
 
-    curl -sf -X POST \
+    local http_response
+    http_response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
         -H "Authorization: Bearer $jwt" \
         -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/app/installations/${GH_INSTALLATION_ID}/access_tokens" \
-        | python3 -c "import sys, json; print(json.load(sys.stdin)['token'])" 2>/dev/null
+        "https://api.github.com/app/installations/${GH_INSTALLATION_ID}/access_tokens" 2>/dev/null)
+
+    local http_body
+    http_body=$(echo "$http_response" | sed -e '$d')
+    local http_code
+    http_code=$(echo "$http_response" | tail -n1 | sed -e 's/HTTP_STATUS://')
+
+    if [ "$http_code" = "201" ]; then
+        python3 -c "import sys, json; print(json.load(sys.stdin)['token'])" <<< "$http_body" 2>/dev/null
+        return 0
+    else
+        local err_msg
+        err_msg=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('message', ''))" <<< "$http_body" 2>/dev/null || echo "$http_body")
+        [ -z "$err_msg" ] && err_msg="Unknown error"
+        echo "GitHub API error (HTTP $http_code): $err_msg" >&2
+        case "$http_code" in
+            401)
+                echo "💡 Tip: Verify that GH_APP_ID='$GH_APP_ID' and '$BOT_KEY_PATH' match your GitHub App." >&2
+                return 2
+                ;;
+            404)
+                echo "💡 Tip: Verify that GH_INSTALLATION_ID='$GH_INSTALLATION_ID' is correct and installed on your account/organization." >&2
+                return 2
+                ;;
+            403)
+                echo "💡 Tip: Ensure the GitHub App has 'Contents: Read and write' and 'Pull requests: Read and write' permissions." >&2
+                return 2
+                ;;
+        esac
+        return 1
+    fi
 }
 
 mint_with_retry() {
     local max_attempts="${1:-3}"
     local delay="${2:-3}"
+    local silent="${3:-false}"
     local attempt=1
     local token=""
+    local rc=0
     while [ "$attempt" -le "$max_attempts" ]; do
-        token=$(mint_gh_token || true)
-        if [ -n "$token" ] && [ "$token" != "null" ]; then
+        if [ "$silent" = "true" ]; then
+            token=$(mint_gh_token 2>/dev/null)
+            rc=$?
+        else
+            token=$(mint_gh_token)
+            rc=$?
+        fi
+        if [ $rc -eq 0 ] && [ -n "$token" ] && [ "$token" != "null" ]; then
             echo "$token"
             return 0
+        elif [ $rc -eq 2 ]; then
+            return 1
         fi
         attempt=$((attempt + 1))
         [ "$attempt" -le "$max_attempts" ] && sleep "$delay"
@@ -463,7 +502,7 @@ mint_with_retry() {
 TOKEN_FILE=$(mktemp "${TMPDIR:-/tmp}/opencode_token.XXXXXX")
 chmod 600 "$TOKEN_FILE"
 
-INITIAL_TOKEN=$(mint_with_retry 3 2)
+INITIAL_TOKEN=$(mint_with_retry 3 2 false)
 if [ -z "$INITIAL_TOKEN" ] || [ "$INITIAL_TOKEN" = "null" ]; then
     echo "Error: Failed to mint GitHub installation token after retries." >&2
     rm -f "$TOKEN_FILE"
@@ -486,8 +525,8 @@ PARENT_PID=$$
             fi
         done
 
-        # Attempt token refresh with exponential retry
-        new_token=$(mint_with_retry 3 5 2>/dev/null || true)
+        # Attempt token refresh with exponential retry (silent mode)
+        new_token=$(mint_with_retry 3 5 true 2>/dev/null || true)
         if [ -n "$new_token" ] && [ "$new_token" != "null" ]; then
             tmp_token="${TOKEN_FILE}.tmp.$$"
             echo "$new_token" > "$tmp_token"
@@ -658,4 +697,4 @@ GitHub App installation tokens expire after **60 minutes**.
 * **Rebuild image to update dependencies:** `ocd --rebuild`
 * **Clear cache for a specific repo:** `rm -rf ~/opencode-docker/data/projects/<project-id>/cache`
 * **Clear chat history for a specific repo:** `rm -rf ~/opencode-docker/data/projects/<project-id>/share`
-* **Migrate to a new machine:** Clone or copy `~/opencode-docker` to your new machine, copy your `app.pem` and `.env`, run `chmod +x ocd && ln -sf ~/opencode-docker/ocd ~/.local/bin/ocd`, and run `ocd`. All chat histories, keys, and configurations will be immediately available.
+* **Migrate to a new machine:** Clone or copy `~/opencode-docker` to your new machine, copy your `app.pem` and `.env`, make `ocd` executable (`chmod +x ocd`), add the alias to your `~/.zshrc` or `~/.bashrc`, and run `ocd`. All chat histories, keys, and configurations will be immediately available.
