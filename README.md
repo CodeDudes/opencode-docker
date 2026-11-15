@@ -33,22 +33,35 @@ cd ~/opencode-docker
 ```
 
 ### 2. Configure Credentials
-1. Copy the configuration template:
+
+We enforce strict defense-in-depth isolation by separating host runner secrets from container agent credentials:
+
+1. **Configure Host Runner (`.env`):**
+   Copy the host configuration template and fill in your GitHub App details:
    ```bash
    cp .env.example .env
    ```
-2. Edit `.env` and fill in your GitHub App credentials and optional LLM API keys:
+   *(These secrets are used strictly by the host `ocd` runner to mint short-lived tokens and are **never** mounted or exposed to the Docker container).*
    ```dotenv
    GH_APP_ID="123456"
    GH_INSTALLATION_ID="87654321"
    GH_APP_SLUG="your-org-opencode-bot"
+   ```
 
-   # Optional LLM API keys:
+2. **Configure Container Agent (`.env.container`):**
+   Copy the container environment template and set the API keys your OpenCode agent will use:
+   ```bash
+   cp .env.container.example .env.container
+   ```
+   *(Variables in this file are passed directly to the container via `docker run --env-file .env.container`).*
+   ```dotenv
    ANTHROPIC_API_KEY="sk-ant-..."
    OPENAI_API_KEY="sk-..."
    GEMINI_API_KEY="AIzaSy..."
    ```
-3. Move your GitHub App private key into the repository directory and secure permissions:
+
+3. **Secure Your Private Key (`app.pem`):**
+   Move your downloaded GitHub App private key into the repository and restrict permissions to owner-only:
    ```bash
    mv ~/Downloads/your-app.private-key.pem ~/opencode-docker/app.pem
    chmod 600 ~/opencode-docker/app.pem
@@ -149,7 +162,7 @@ Configure MCP servers in `~/opencode-docker/data/global/config/opencode.json` (o
 }
 ```
 
-* **Dynamic Environment Variables:** Any variable defined in `.env` starting with `MCP_*` (plus `BRAVE_API_KEY`, `TAVILY_API_KEY`, and `DATABASE_URL`) is automatically forwarded into the container.
+* **Arbitrary Tool Secrets:** Define any tool credentials directly in `.env.container` (e.g. `BRAVE_API_KEY`, `DATABASE_URL`, or `STRIPE_KEY`). Because `ocd` passes `.env.container` via Docker's native `--env-file`, tools receive their variables with zero code changes or whitelisting.
 * **Instant Startup:** The `~/.npm` directory is persisted under `data/global/cache/npm`, ensuring `npx` MCP servers launch in milliseconds without re-downloading packages.
 
 ### 2. Skills (On-Demand Knowledge Injection)

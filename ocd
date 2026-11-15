@@ -38,6 +38,7 @@ ENTRYPOINT_SCRIPT="$SCRIPT_DIR/docker-entrypoint.sh"
 
 BOT_NAME="${GH_APP_SLUG}[bot]"
 BOT_EMAIL="${GH_APP_ID}+${GH_APP_SLUG}[bot]@users.noreply.github.com"
+CONTAINER_ENV_FILE="${CONTAINER_ENV_FILE:-$SCRIPT_DIR/.env.container}"
 SANDBOX_MODE=false
 
 # -----------------------------------------------------------------------------
@@ -276,29 +277,30 @@ if [ -f "$ENTRYPOINT_SCRIPT" ]; then
     mounts+=(-v "$ENTRYPOINT_SCRIPT":/usr/local/bin/docker-entrypoint.sh:ro)
 fi
 
+# Bot git identity
 env_args=(
     -e GIT_AUTHOR_NAME="$BOT_NAME"
     -e GIT_AUTHOR_EMAIL="$BOT_EMAIL"
     -e GIT_COMMITTER_NAME="$BOT_NAME"
     -e GIT_COMMITTER_EMAIL="$BOT_EMAIL"
-    ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"}
-    ${OPENAI_API_KEY:+-e OPENAI_API_KEY="$OPENAI_API_KEY"}
-    ${GEMINI_API_KEY:+-e GEMINI_API_KEY="$GEMINI_API_KEY"}
-    ${OPENROUTER_API_KEY:+-e OPENROUTER_API_KEY="$OPENROUTER_API_KEY"}
-    ${DEEPSEEK_API_KEY:+-e DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY"}
-    ${GROQ_API_KEY:+-e GROQ_API_KEY="$GROQ_API_KEY"}
-    ${MISTRAL_API_KEY:+-e MISTRAL_API_KEY="$MISTRAL_API_KEY"}
-    ${OLLAMA_API_BASE:+-e OLLAMA_API_BASE="$OLLAMA_API_BASE"}
-    ${OPENAI_API_BASE:+-e OPENAI_API_BASE="$OPENAI_API_BASE"}
 )
 
-# Forward dynamic MCP_* variables and common external tool keys
-for var in $(compgen -v | grep '^MCP_' || true); do
-    env_args+=(-e "$var=${!var}")
-done
-for var in BRAVE_API_KEY TAVILY_API_KEY DATABASE_URL POSTGRES_URL; do
-    if [ -n "${!var:-}" ]; then
-        env_args+=(-e "$var=${!var}")
+# Container environment file (--env-file)
+# Passes all agent LLM keys and MCP credentials directly to Docker
+if [ -f "$CONTAINER_ENV_FILE" ]; then
+    env_args+=(--env-file "$CONTAINER_ENV_FILE")
+fi
+
+# Optional project-specific container env override
+if [ "$WORKSPACE_DIR" != "$SCRIPT_DIR" ] && [ -f "$WORKSPACE_DIR/.env.container" ]; then
+    env_args+=(--env-file "$WORKSPACE_DIR/.env.container")
+fi
+
+# Fallback: Forward host environment variables if set in current shell
+for key in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY \
+           DEEPSEEK_API_KEY GROQ_API_KEY MISTRAL_API_KEY OLLAMA_API_BASE OPENAI_API_BASE; do
+    if [ -n "${!key:-}" ]; then
+        env_args+=(-e "$key=${!key}")
     fi
 done
 
