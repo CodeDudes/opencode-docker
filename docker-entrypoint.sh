@@ -39,6 +39,13 @@ git config --global credential.helper "store --file ${HOME}/.git-credentials"
 git config --global url."https://github.com/".insteadOf "git@github.com:"
 git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
 
+if [ -n "$GIT_AUTHOR_NAME" ]; then
+    git config --global user.name "$GIT_AUTHOR_NAME"
+fi
+if [ -n "$GIT_AUTHOR_EMAIL" ]; then
+    git config --global user.email "$GIT_AUTHOR_EMAIL"
+fi
+
 # 2. Apply initial token
 apply_token
 
@@ -57,8 +64,16 @@ if [ -f "$TOKEN_FILE" ]; then
     ) &
 fi
 
-# 4. Hand over to opencode (or shell if specified)
-if [ "$1" = "bash" ] || [ "$1" = "sh" ]; then
+# 4. Hand over execution:
+# - If no arguments or flags (-*, --*), launch opencode
+# - If 'opencode' command explicitly specified, execute directly
+# - If command exists in PATH (e.g. bash, sh, git, gh, python3), execute directly
+# - Otherwise, pass arguments through to opencode
+if [ $# -eq 0 ] || [ "${1#-}" != "$1" ]; then
+    exec opencode "$@"
+elif [ "$1" = "opencode" ]; then
+    exec "$@"
+elif command -v "$1" >/dev/null 2>&1; then
     exec "$@"
 else
     exec opencode "$@"
