@@ -132,13 +132,18 @@ All runtime data is consolidated inside `~/opencode-docker/data/` (automatically
 
 ---
 
-## Extending OpenCode: MCP Servers & Skills
+## Configuring MCP Servers, Skills & Commands
 
-`ocd` provides first-class support for **Model Context Protocol (MCP)** tools, modular **Skills**, and custom **Slash Commands**. On your first run, starter templates from `config.example/` are automatically seeded into `~/opencode-docker/data/global/config/`.
+OpenCode natively supports **Model Context Protocol (MCP)** tools, modular **Skills**, and custom **Slash Commands**. The container maps your local directories so you can configure them globally or per repository.
+
+*(Optional reference templates are provided in `config.example/` if you want to inspect or copy starter configurations; none are enabled by default).*
 
 ### 1. Model Context Protocol (MCP) Servers
-Configure MCP servers in `~/opencode-docker/data/global/config/opencode.json` (or in `<repo>/opencode.json` for repository-specific tools):
+Configure MCP servers using the `"mcp"` key in your OpenCode configuration:
+* **Global Tools (Available across all projects):** Create `~/opencode-docker/data/global/config/opencode.json`
+* **Repository Tools (Scoped to this repository only):** Create `<repo>/opencode.json`
 
+Example configuration:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
@@ -149,30 +154,24 @@ Configure MCP servers in `~/opencode-docker/data/global/config/opencode.json` (o
     },
     "filesystem": {
       "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
-      "enabled": false
-    },
-    "brave-search": {
-      "command": ["npx", "-y", "@modelcontextprotocol/server-brave-search"],
-      "enabled": false,
-      "env": {
-        "BRAVE_API_KEY": "{env:BRAVE_API_KEY}"
-      }
+      "enabled": true
     }
   }
 }
 ```
 
-* **Arbitrary Tool Secrets:** Define any tool credentials directly in `.env.container` (e.g. `BRAVE_API_KEY`, `DATABASE_URL`, or `STRIPE_KEY`). Because `ocd` passes `.env.container` via Docker's native `--env-file`, tools receive their variables with zero code changes or whitelisting.
-* **Instant Startup:** The `~/.npm` directory is persisted under `data/global/cache/npm`, ensuring `npx` MCP servers launch in milliseconds without re-downloading packages.
+* **Tool Credentials:** Define any required API keys (e.g. `BRAVE_API_KEY`, `DATABASE_URL`) in `.env.container`. They are passed to the container via Docker's native `--env-file`.
+* **npm Cache:** Package downloads for `npx` MCP servers are cached in `data/global/cache/npm` to avoid re-downloading on each run.
 
-### 2. Skills (On-Demand Knowledge Injection)
-Skills are modular markdown instructions that OpenCode dynamically loads when your prompt requires them:
-* **Global Skills:** Place in `~/opencode-docker/data/global/config/skills/<skill-name>/SKILL.md` (e.g. standard `git-workflow`).
-* **Project Skills:** Place in `<repo>/.opencode/skills/<skill-name>/SKILL.md`.
+### 2. Skills
+Skills are modular markdown instructions (`SKILL.md`) that OpenCode loads dynamically when relevant to user prompts:
+* **Global Skills:** Place in `~/opencode-docker/data/global/config/skills/<skill-name>/SKILL.md`
+* **Project Skills:** Place in `<repo>/.opencode/skills/<skill-name>/SKILL.md`
 
 ### 3. Custom Commands (Slash Commands)
-Create reusable prompts and slash commands with live shell integration (`!command`):
-* Place markdown files in `~/opencode-docker/data/global/config/commands/` (e.g., `/review-pr` in `commands/review-pr.md` which inspects `!git diff --staged`).
+Custom slash commands allow you to create reusable prompts in the OpenCode TUI:
+* **Global Commands:** Place markdown files in `~/opencode-docker/data/global/config/commands/<command-name>.md`
+* **Project Commands:** Place markdown files in `<repo>/.opencode/commands/<command-name>.md`
 
 ---
 

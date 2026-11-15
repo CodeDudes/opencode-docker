@@ -308,12 +308,6 @@ if [ "$SANDBOX_MODE" = false ]; then
     # 1. SHARED: Global settings, commands, MCP servers, skills & npm cache
     mkdir -p "$DATA_ROOT/global"/{config,state,cache/npm}
 
-    # Seed starter config (MCP servers, skills, commands) if not already present
-    if [ ! -f "$DATA_ROOT/global/config/opencode.json" ] && [ -d "$SCRIPT_DIR/config.example" ]; then
-        mkdir -p "$DATA_ROOT/global/config"
-        cp -R "$SCRIPT_DIR/config.example/"* "$DATA_ROOT/global/config/" 2>/dev/null || true
-    fi
-
     mounts+=(
         -v "$DATA_ROOT/global/config":/home/opencode/.config/opencode
         -v "$DATA_ROOT/global/state":/home/opencode/.local/state/opencode

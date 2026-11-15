@@ -6,7 +6,7 @@
         "uvx",
         "mcp-server-fetch"
       ],
-      "enabled": true
+      "enabled": false
     },
     "filesystem": {
       "command": [
