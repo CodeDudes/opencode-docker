@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+# =============================================================================
+# OpenCode Docker CLI (ocd)
+# Runs autonomous coding agents in an ephemeral, hardened Docker container
+# with GitHub App credentials, non-root execution, and tiered storage.
+# =============================================================================
+
+set -e
+
+# -----------------------------------------------------------------------------
+# 1. Resolve Script Directory Across Symlinks (macOS & Linux Portable)
+# -----------------------------------------------------------------------------
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# -----------------------------------------------------------------------------
+# 2. Load Configuration (.env file or Environment Variables)
+# -----------------------------------------------------------------------------
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/.env"
+    set +a
+fi
+
+GH_APP_ID="${GH_APP_ID:-${gh_app_id:-}}"
+GH_INSTALLATION_ID="${GH_INSTALLATION_ID:-${gh_install_id:-}}"
+GH_APP_SLUG="${GH_APP_SLUG:-${gh_app_slug:-opencode-bot}}"
+IMAGE_NAME="${OPENCODE_IMAGE:-opencode-dev:latest}"
+BOT_KEY_PATH="${GH_APP_KEY_PATH:-$SCRIPT_DIR/app.pem}"
+DATA_ROOT="$SCRIPT_DIR/data"
+ENTRYPOINT_SCRIPT="$SCRIPT_DIR/docker-entrypoint.sh"
+
+BOT_NAME="${GH_APP_SLUG}[bot]"
+BOT_EMAIL="${GH_APP_ID}+${GH_APP_SLUG}[bot]@users.noreply.github.com"
+CONTAINER_ENV_FILE="${CONTAINER_ENV_FILE:-$SCRIPT_DIR/.env.container}"
+SANDBOX_MODE=false
+
+# -----------------------------------------------------------------------------
+# 3. Parse CLI Flags
+# -----------------------------------------------------------------------------
+show_help() {
+    cat << EOF
+OpenCode Docker CLI (ocd)
+
+Usage:
+  ocd [options] [workspace_dir] [-- <agent args>]
+
+Options:
+  --rebuild            Rebuild the Docker image with your host UID/GID
+  --sandbox, --isolated Run in disposable sandbox mode (no caches or stored state)
+  -h, --help           Show this help message and exit
+
+Examples:
+  ocd                      # Launch OpenCode in current directory
+  ocd ~/projects/my-repo   # Launch OpenCode in specified directory
+  ocd --sandbox .          # Launch isolated session for inspecting untrusted code
+  ocd --rebuild            # Rebuild container image with updated dependencies
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        --rebuild)
+            echo "Rebuilding $IMAGE_NAME..."
+            docker build --pull \
+                --build-arg USER_UID="$(id -u)" \
+                --build-arg USER_GID="$(id -g)" \
+                -t "$IMAGE_NAME" -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
+            echo "✅ Successfully rebuilt $IMAGE_NAME."
+            shift
+            if [ $# -eq 0 ]; then
+                exit 0
+            fi
+            ;;
+        --sandbox|--isolated)
+            SANDBOX_MODE=true
+            echo "🔒 Running in SANDBOX mode: host caches and stored credentials disabled."
+            shift
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Run 'ocd --help' for usage." >&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# -----------------------------------------------------------------------------
+# 4. Resolve Target Workspace Directory
+# -----------------------------------------------------------------------------
+TARGET_DIR="${1:-.}"
+if [ -d "$TARGET_DIR" ]; then
+    WORKSPACE_DIR="$(cd "$TARGET_DIR" && pwd -P)"
+    [ $# -gt 0 ] && shift
+else
+    echo "Error: Directory '$TARGET_DIR' does not exist." >&2
+    exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# 5. Validate GitHub App Configuration & Private Key
+# -----------------------------------------------------------------------------
+if [ -z "$GH_APP_ID" ] || [ "$GH_APP_ID" = "YOUR_APP_ID" ] || \
+   [ -z "$GH_INSTALLATION_ID" ] || [ "$GH_INSTALLATION_ID" = "YOUR_INSTALLATION_ID" ]; then
+    echo "Error: GitHub App configuration is missing." >&2
+    echo "Please set GH_APP_ID and GH_INSTALLATION_ID in $SCRIPT_DIR/.env" >&2
+    echo "See $SCRIPT_DIR/.env.example for guidance." >&2
+    exit 1
+fi
+
+if [ ! -f "$BOT_KEY_PATH" ]; then
+    echo "Error: GitHub App private key not found at '$BOT_KEY_PATH'" >&2
+    exit 1
+fi
+chmod 600 "$BOT_KEY_PATH" 2>/dev/null || true
+
+# -----------------------------------------------------------------------------
+# 6. Host-Side Token Minting (OpenSSL + curl + python3)
+# -----------------------------------------------------------------------------
+mint_gh_token() {
+    local now
+    now=$(date +%s)
+    local iat=$((now - 60))
+    local exp=$((now + 540))
+
+    local b64enc="openssl base64 -e -A | tr '+/' '-_' | tr -d '='"
+    local header
+    header=$(printf '{"alg":"RS256","typ":"JWT"}' | eval "$b64enc")
+    local payload
+    payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$iat" "$exp" "$GH_APP_ID" | eval "$b64enc")
+    local sig
+    sig=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$BOT_KEY_PATH" 2>/dev/null | eval "$b64enc")
+    if [ -z "$sig" ]; then
+        echo "Error: Failed to sign JWT with key '$BOT_KEY_PATH'. Is it a valid RSA private key?" >&2
+        return 1
+    fi
+    local jwt="${header}.${payload}.${sig}"
+
+    local http_response
+    http_response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+        -H "Authorization: Bearer $jwt" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/app/installations/${GH_INSTALLATION_ID}/access_tokens" 2>/dev/null)
+
+    local http_body
+    http_body=$(echo "$http_response" | sed -e '$d')
+    local http_code
+    http_code=$(echo "$http_response" | tail -n1 | sed -e 's/HTTP_STATUS://')
+
+    if [ "$http_code" = "201" ]; then
+        python3 -c "import sys, json; print(json.load(sys.stdin)['token'])" <<< "$http_body" 2>/dev/null
+        return 0
+    else
+        local err_msg
+        err_msg=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('message', ''))" <<< "$http_body" 2>/dev/null || echo "$http_body")
+        [ -z "$err_msg" ] && err_msg="Unknown error"
+        echo "GitHub API error (HTTP $http_code): $err_msg" >&2
+        case "$http_code" in
+            401)
+                echo "💡 Tip: Verify that GH_APP_ID='$GH_APP_ID' and '$BOT_KEY_PATH' match your GitHub App." >&2
+                return 2
+                ;;
+            404)
+                echo "💡 Tip: Verify that GH_INSTALLATION_ID='$GH_INSTALLATION_ID' is correct and installed on your account/organization." >&2
+                return 2
+                ;;
+            403)
+                echo "💡 Tip: Ensure the GitHub App has 'Contents: Read and write' and 'Pull requests: Read and write' permissions." >&2
+                return 2
+                ;;
+        esac
+        return 1
+    fi
+}
+
+mint_with_retry() {
+    local max_attempts="${1:-3}"
+    local delay="${2:-3}"
+    local silent="${3:-false}"
+    local attempt=1
+    local token=""
+    local rc=0
+    while [ "$attempt" -le "$max_attempts" ]; do
+        if [ "$silent" = "true" ]; then
+            token=$(mint_gh_token 2>/dev/null)
+            rc=$?
+        else
+            token=$(mint_gh_token)
+            rc=$?
+        fi
+        if [ $rc -eq 0 ] && [ -n "$token" ] && [ "$token" != "null" ]; then
+            echo "$token"
+            return 0
+        elif [ $rc -eq 2 ]; then
+            return 1
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -le "$max_attempts" ] && sleep "$delay"
+    done
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+# 7. Create Ephemeral Token File & Resilient Background Refresher
+# -----------------------------------------------------------------------------
+TOKEN_FILE=$(mktemp "${TMPDIR:-/tmp}/opencode_token.XXXXXX")
+chmod 600 "$TOKEN_FILE"
+
+INITIAL_TOKEN=$(mint_with_retry 3 2 false)
+if [ -z "$INITIAL_TOKEN" ] || [ "$INITIAL_TOKEN" = "null" ]; then
+    echo "Error: Failed to mint GitHub installation token after retries." >&2
+    rm -f "$TOKEN_FILE"
+    exit 1
+fi
+echo "$INITIAL_TOKEN" > "$TOKEN_FILE"
+
+# Refresher subshell: checks parent PID liveness every 30s; refreshes every 45m (90 * 30s)
+PARENT_PID=$$
+(
+    while [ -f "$TOKEN_FILE" ]; do
+        for _ in $(seq 1 90); do
+            sleep 30
+            # Parent process liveness check: terminate immediately if parent died
+            if ! kill -0 "$PARENT_PID" 2>/dev/null; then
+                break 2
+            fi
+            if [ ! -f "$TOKEN_FILE" ]; then
+                break 2
+            fi
+        done
+
+        # Attempt token refresh with exponential retry (silent mode)
+        new_token=$(mint_with_retry 3 5 true 2>/dev/null || true)
+        if [ -n "$new_token" ] && [ "$new_token" != "null" ]; then
+            tmp_token="${TOKEN_FILE}.tmp.$$"
+            echo "$new_token" > "$tmp_token"
+            chmod 600 "$tmp_token"
+            mv -f "$tmp_token" "$TOKEN_FILE"
+        fi
+    done
+) &
+REFRESH_PID=$!
+
+cleanup() {
+    local exit_code=$?
+    if [ -n "${REFRESH_PID:-}" ] && kill -0 "$REFRESH_PID" 2>/dev/null; then
+        kill "$REFRESH_PID" 2>/dev/null || true
+        wait "$REFRESH_PID" 2>/dev/null || true
+    fi
+    rm -f "$TOKEN_FILE" "${TOKEN_FILE}.tmp"* 2>/dev/null || true
+    exit "$exit_code"
+}
+trap cleanup EXIT INT TERM HUP
+
+# -----------------------------------------------------------------------------
+# 8. Assemble Mounts & Environment Variables
+# -----------------------------------------------------------------------------
+mounts=(
+    -v "$WORKSPACE_DIR":/workspace
+    -v "$TOKEN_FILE":/run/secrets/github_token:ro
+)
+
+if [ -f "$ENTRYPOINT_SCRIPT" ]; then
+    mounts+=(-v "$ENTRYPOINT_SCRIPT":/usr/local/bin/docker-entrypoint.sh:ro)
+fi
+
+# Bot git identity
+env_args=(
+    -e GIT_AUTHOR_NAME="$BOT_NAME"
+    -e GIT_AUTHOR_EMAIL="$BOT_EMAIL"
+    -e GIT_COMMITTER_NAME="$BOT_NAME"
+    -e GIT_COMMITTER_EMAIL="$BOT_EMAIL"
+)
+
+# Container environment file (--env-file)
+# Passes all agent LLM keys and MCP credentials directly to Docker
+if [ -f "$CONTAINER_ENV_FILE" ]; then
+    env_args+=(--env-file "$CONTAINER_ENV_FILE")
+fi
+
+# Optional project-specific container env override
+if [ "$WORKSPACE_DIR" != "$SCRIPT_DIR" ] && [ -f "$WORKSPACE_DIR/.env.container" ]; then
+    env_args+=(--env-file "$WORKSPACE_DIR/.env.container")
+fi
+
+# Fallback: Forward host environment variables if set in current shell
+for key in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY \
+           DEEPSEEK_API_KEY GROQ_API_KEY MISTRAL_API_KEY OLLAMA_API_BASE OPENAI_API_BASE; do
+    if [ -n "${!key:-}" ]; then
+        env_args+=(-e "$key=${!key}")
+    fi
+done
+
+if [ "$SANDBOX_MODE" = false ]; then
+    # 1. SHARED: Global settings, commands, MCP servers, skills & npm cache
+    mkdir -p "$DATA_ROOT/global"/{config,state,cache/npm}
+
+    mounts+=(
+        -v "$DATA_ROOT/global/config":/home/opencode/.config/opencode
+        -v "$DATA_ROOT/global/state":/home/opencode/.local/state/opencode
+        -v "$DATA_ROOT/global/cache/npm":/home/opencode/.npm
+    )
+
+    # 2. ISOLATED: Caches and session histories scoped strictly to this repository
+    project_name=$(basename "$WORKSPACE_DIR")
+    project_hash=$(python3 -c "import hashlib; print(hashlib.md5('''$WORKSPACE_DIR'''.encode()).hexdigest()[:8])" 2>/dev/null || printf '%s' "$WORKSPACE_DIR" | md5sum 2>/dev/null | cut -c1-8 || printf '%s' "$WORKSPACE_DIR" | md5 2>/dev/null | cut -c1-8)
+    project_id="${project_name}-${project_hash}"
+    project_data="$DATA_ROOT/projects/$project_id"
+
+    mkdir -p "$project_data"/{cache,go,share}
+    mounts+=(
+        -v "$project_data/cache":/home/opencode/.cache
+        -v "$project_data/go":/home/opencode/go
+        -v "$project_data/share":/home/opencode/.local/share/opencode
+    )
+fi
+
+# -----------------------------------------------------------------------------
+# 9. Build Image Automatically on First Run
+# -----------------------------------------------------------------------------
+if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    echo "Building $IMAGE_NAME..."
+    docker build \
+        --build-arg USER_UID="$(id -u)" \
+        --build-arg USER_GID="$(id -g)" \
+        -t "$IMAGE_NAME" -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
+fi
+
+# -----------------------------------------------------------------------------
+# 10. Launch Container
+# -----------------------------------------------------------------------------
+echo "Launching OpenCode in: $WORKSPACE_DIR (as $BOT_NAME)"
+
+docker_tty_args=()
+if [ -t 0 ] && [ -t 1 ]; then
+    docker_tty_args=(-it)
+elif [ -t 0 ]; then
+    docker_tty_args=(-i)
+fi
+
+docker run "${docker_tty_args[@]}" --rm \
+    --init \
+    --security-opt=no-new-privileges:true \
+    --pids-limit 1024 \
+    "${mounts[@]}" \
+    "${env_args[@]}" \
+    --workdir /workspace \
+    "$IMAGE_NAME" "$@"

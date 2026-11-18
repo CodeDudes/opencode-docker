@@ -1,0 +1,14 @@
+# Private keys and secrets
+app.pem
+*.pem
+.env*
+*.env*
+!.env.example
+!.env.container.example
+
+# Persistent runtime data, caches, and session history
+data/
+.data/
+
+# Drafts and blog articles
+blogs/
