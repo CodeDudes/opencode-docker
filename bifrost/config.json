@@ -1,0 +1,37 @@
+{
+  "client": {
+    "enable_logging": true
+  },
+  "mcp": {
+    "client_configs": [
+      {
+        "client_id": "fetch",
+        "name": "fetch",
+        "connection_type": "stdio",
+        "command": "uvx",
+        "args": [
+          "mcp-server-fetch"
+        ],
+        "tools_to_execute": [
+          "*"
+        ]
+      },
+      {
+        "client_id": "brave-search",
+        "name": "brave-search",
+        "connection_type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-brave-search"
+        ],
+        "env": {
+          "BRAVE_API_KEY": "env.BRAVE_API_KEY"
+        },
+        "tools_to_execute": [
+          "*"
+        ]
+      }
+    ]
+  }
+}
