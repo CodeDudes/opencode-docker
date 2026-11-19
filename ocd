@@ -42,24 +42,83 @@ CONTAINER_ENV_FILE="${CONTAINER_ENV_FILE:-$SCRIPT_DIR/.env.container}"
 SANDBOX_MODE=false
 
 # -----------------------------------------------------------------------------
-# 3. Parse CLI Flags
+# 3. Handle Gateway Subcommand & Parse CLI Flags
 # -----------------------------------------------------------------------------
+if [ "${1:-}" = "gateway" ]; then
+    shift
+    action="${1:-status}"
+    compose_file="$SCRIPT_DIR/bifrost/docker-compose.yml"
+    if [ ! -f "$compose_file" ]; then
+        echo "Error: Bifrost compose file not found at '$compose_file'" >&2
+        exit 1
+    fi
+    case "$action" in
+        start|up)
+            echo "Starting Bifrost Gateway..."
+            docker compose -f "$compose_file" up -d
+            echo "✅ Bifrost Gateway is running at http://localhost:8080"
+            ;;
+        stop|down)
+            echo "Stopping Bifrost Gateway..."
+            docker compose -f "$compose_file" down
+            echo "✅ Bifrost Gateway stopped."
+            ;;
+        restart)
+            echo "Restarting Bifrost Gateway..."
+            docker compose -f "$compose_file" restart
+            ;;
+        logs)
+            docker compose -f "$compose_file" logs -f
+            ;;
+        ui|dashboard|open)
+            if command -v open >/dev/null 2>&1; then
+                open "http://localhost:8080"
+            elif command -v xdg-open >/dev/null 2>&1; then
+                xdg-open "http://localhost:8080"
+            else
+                echo "Open http://localhost:8080 in your browser."
+            fi
+            ;;
+        status)
+            if docker compose -f "$compose_file" ps --status running 2>/dev/null | grep -q "ocd-bifrost-gateway"; then
+                echo "🟢 Bifrost Gateway is RUNNING at http://localhost:8080"
+            else
+                echo "🔴 Bifrost Gateway is NOT running. Start it with: ocd gateway start"
+            fi
+            ;;
+        *)
+            echo "Usage: ocd gateway [start|stop|restart|status|logs|ui]" >&2
+            exit 1
+            ;;
+    esac
+    exit 0
+fi
+
 show_help() {
     cat << EOF
 OpenCode Docker CLI (ocd)
 
 Usage:
   ocd [options] [workspace_dir] [-- <agent args>]
+  ocd gateway [start|stop|status|logs|ui]
 
 Options:
   --rebuild            Rebuild the Docker image with your host UID/GID
   --sandbox, --isolated Run in disposable sandbox mode (no caches or stored state)
   -h, --help           Show this help message and exit
 
+Gateway Commands (Optional Zero-Secret Sidecar):
+  gateway start        Start the Bifrost AI & MCP Gateway daemon
+  gateway stop         Stop the Bifrost Gateway daemon
+  gateway status       Check if Bifrost Gateway is running
+  gateway logs         View live logs from Bifrost Gateway
+  gateway ui           Open the Bifrost Web Dashboard in your browser
+
 Examples:
   ocd                      # Launch OpenCode in current directory
   ocd ~/projects/my-repo   # Launch OpenCode in specified directory
   ocd --sandbox .          # Launch isolated session for inspecting untrusted code
+  ocd gateway start        # Start the optional Bifrost Zero-Secret Gateway
   ocd --rebuild            # Rebuild container image with updated dependencies
 EOF
 }
@@ -340,8 +399,16 @@ if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
 fi
 
 # -----------------------------------------------------------------------------
-# 10. Launch Container
+# 10. Check Optional Bifrost Gateway Liveness & Launch Container
 # -----------------------------------------------------------------------------
+if grep -qs -E "(OPENAI_API_BASE|ANTHROPIC_BASE_URL).*8080" "$CONTAINER_ENV_FILE" 2>/dev/null || \
+   [[ "${OPENAI_API_BASE:-}" == *"8080"* ]] || [[ "${ANTHROPIC_BASE_URL:-}" == *"8080"* ]]; then
+    if ! curl -s -m 1 http://127.0.0.1:8080 >/dev/null 2>&1 && ! nc -z -w 1 127.0.0.1 8080 2>/dev/null; then
+        echo "⚠️  Notice: Bifrost Gateway is configured on port 8080, but does not appear to be running." >&2
+        echo "   You can start it with: ocd gateway start" >&2
+    fi
+fi
+
 echo "Launching OpenCode in: $WORKSPACE_DIR (as $BOT_NAME)"
 
 docker_tty_args=()
@@ -355,6 +422,7 @@ docker run "${docker_tty_args[@]}" --rm \
     --init \
     --security-opt=no-new-privileges:true \
     --pids-limit 1024 \
+    --add-host host.docker.internal:host-gateway \
     "${mounts[@]}" \
     "${env_args[@]}" \
     --workdir /workspace \

@@ -60,6 +60,10 @@ We enforce strict defense-in-depth isolation by separating host runner secrets f
    GEMINI_API_KEY="AIzaSy..."
    ```
 
+   > [!TIP]
+   > **Want Zero-Secret Isolation?**
+   > `.env.container` protects your host machine from the agent, but the agent inside Docker can inspect its own environment. For zero-trust isolation where master keys are completely hidden from the agent, see the optional **[Bifrost Gateway Guide](bifrost/README.md)**.
+
 3. **Secure Your Private Key (`app.pem`):**
    Move your downloaded GitHub App private key into the repository and restrict permissions to owner-only:
    ```bash
@@ -67,7 +71,7 @@ We enforce strict defense-in-depth isolation by separating host runner secrets f
    chmod 600 ~/opencode-docker/app.pem
    ```
 
-*(Need to create a GitHub App? See the [Step-by-Step GitHub App Guide](blog.md#1-create-the-github-app-and-gather-credentials) in `blog.md`).*
+*(Need to create a GitHub App? See the [GitHub App Creation Guide](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps)).*
 
 ### 3. Add the `ocd` Alias to Your Shell
 Make `ocd` executable and add the alias to your shell profile:
@@ -160,7 +164,20 @@ Example configuration:
 }
 ```
 
-* **Tool Credentials:** Define any required API keys (e.g. `BRAVE_API_KEY`, `DATABASE_URL`) in `.env.container`. They are passed to the container via Docker's native `--env-file`.
+* **Tool Credentials (Native Mode):** Define any required API keys (e.g. `BRAVE_API_KEY`, `DATABASE_URL`) in `.env.container`. They are passed to the container via Docker's native `--env-file`.
+* **Zero-Secret Mode (Bifrost Gateway):** If you prefer not to expose raw tool keys or LLM master keys inside the container, use the integrated **[Bifrost Gateway](bifrost/README.md)**. The agent connects to tools over SSE without having credentials on disk:
+  ```json
+  {
+    "mcp": {
+      "bifrost": {
+        "type": "remote",
+        "url": "http://host.docker.internal:8080/mcp/sse",
+        "enabled": true
+      }
+    }
+  }
+  ```
+  *(See `config.example/opencode.bifrost.json` and run `ocd gateway start`).*
 * **npm Cache:** Package downloads for `npx` MCP servers are cached in `data/global/cache/npm` to avoid re-downloading on each run.
 
 ### 2. Skills
@@ -197,19 +214,26 @@ To move your entire OpenCode setup to a new machine:
 
 ---
 
+## Gateway Management Commands
+
+When using the optional Bifrost Zero-Secret Gateway, manage the daemon directly from `ocd`:
+
+```bash
+ocd gateway start    # Start the Bifrost Gateway daemon (:8080)
+ocd gateway stop     # Stop the Bifrost Gateway daemon
+ocd gateway status   # Check if Bifrost Gateway is running
+ocd gateway logs     # View live streaming logs from Bifrost
+ocd gateway ui       # Open http://localhost:8080 in your default browser
+```
+
+---
+
 ## Security Boundaries & Recommended Safeguards
 
-While `ocd` guarantees complete host machine isolation, autonomous agents with workspace write access still require codebase-level safeguards:
+While `ocd` guarantees complete host machine isolation, autonomous agents with workspace write access still benefit from defense-in-depth safeguards:
+* **Zero-Secret Isolation:** Route through the [Bifrost Gateway](bifrost/README.md) to keep master LLM keys and tool credentials off the container filesystem.
 * **GitHub Branch Protection:** Enforce PR reviews and block direct pushes to `main`.
 * **Disable Force Pushes:** Ensure `Allow force pushes` is disabled in GitHub branch rulesets.
 * **Strict App Scoping:** Grant the GitHub App access only to specific target repositories.
 * **Provider Spend Limits:** Set monthly hard caps in your LLM provider dashboards to prevent runaway loops.
 * **Lockfiles:** Commit package lockfiles (`package-lock.json`, `uv.lock`, etc.) to prevent hallucinated package attacks.
-
-For a full breakdown of agent threat vectors, see [blog.md](blog.md).
-
----
-
-## In-Depth Documentation
-
-For the full architectural deep dive, security threat model, and line-by-line script walkthrough, read [blog.md](blog.md).
