@@ -171,13 +171,13 @@ Example configuration:
     "mcp": {
       "bifrost": {
         "type": "remote",
-        "url": "http://host.docker.internal:8080/mcp/sse",
+        "url": "http://host.docker.internal:{env:BIFROST_PORT}/mcp/sse",
         "enabled": true
       }
     }
   }
   ```
-  *(See `config.example/opencode.bifrost.json` and run `ocd gateway start`).*
+  *(See template in `config.example/opencode.json` and run `ocd gateway start`).*
 * **npm Cache:** Package downloads for `npx` MCP servers are cached in `data/global/cache/npm` to avoid re-downloading on each run.
 
 ### 2. Skills

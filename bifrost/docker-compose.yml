@@ -4,7 +4,7 @@ services:
     container_name: ocd-bifrost-gateway
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${BIFROST_PORT:-8321}:8080"
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json:ro
