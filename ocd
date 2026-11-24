@@ -295,28 +295,33 @@ if [ -z "$INITIAL_TOKEN" ] || [ "$INITIAL_TOKEN" = "null" ]; then
 fi
 echo "$INITIAL_TOKEN" > "$TOKEN_FILE"
 
-# Refresher subshell: checks parent PID liveness every 30s; refreshes every 45m (90 * 30s)
+# Refresher subshell: checks parent PID and wall-clock elapsed time every 15s.
+# Using wall-clock time ensures tokens refresh immediately after laptop sleep/wake!
 PARENT_PID=$$
 (
-    while [ -f "$TOKEN_FILE" ]; do
-        for _ in $(seq 1 90); do
-            sleep 30
-            # Parent process liveness check: terminate immediately if parent died
-            if ! kill -0 "$PARENT_PID" 2>/dev/null; then
-                break 2
-            fi
-            if [ ! -f "$TOKEN_FILE" ]; then
-                break 2
-            fi
-        done
+    last_refresh=$(date +%s)
+    refresh_interval=2400 # Refresh every 40 minutes
 
-        # Attempt token refresh with exponential retry (silent mode)
-        new_token=$(mint_with_retry 3 5 true 2>/dev/null || true)
-        if [ -n "$new_token" ] && [ "$new_token" != "null" ]; then
-            tmp_token="${TOKEN_FILE}.tmp.$$"
-            echo "$new_token" > "$tmp_token"
-            chmod 600 "$tmp_token"
-            mv -f "$tmp_token" "$TOKEN_FILE"
+    while [ -f "$TOKEN_FILE" ]; do
+        sleep 15
+        # Parent process liveness check: terminate immediately if parent died
+        if ! kill -0 "$PARENT_PID" 2>/dev/null; then
+            break
+        fi
+        if [ ! -f "$TOKEN_FILE" ]; then
+            break
+        fi
+
+        now=$(date +%s)
+        elapsed=$((now - last_refresh))
+
+        if [ "$elapsed" -ge "$refresh_interval" ]; then
+            new_token=$(mint_with_retry 3 5 true 2>/dev/null || true)
+            if [ -n "$new_token" ] && [ "$new_token" != "null" ]; then
+                # Write in-place to preserve inode for Docker single-file bind mounts
+                printf '%s\n' "$new_token" > "$TOKEN_FILE"
+                last_refresh=$(date +%s)
+            fi
         fi
     done
 ) &

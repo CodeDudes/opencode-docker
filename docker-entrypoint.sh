@@ -54,7 +54,7 @@ if [ -f "$TOKEN_FILE" ]; then
     (
         last_token="$(get_current_token)"
         while true; do
-            sleep 30
+            sleep 10
             curr_token="$(get_current_token)"
             if [ -n "$curr_token" ] && [ "$curr_token" != "$last_token" ]; then
                 apply_token
