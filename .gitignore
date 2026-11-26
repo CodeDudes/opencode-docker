@@ -5,10 +5,12 @@ app.pem
 *.env*
 !.env.example
 !.env.container.example
+!bifrost/.env.bifrost.example
 
 # Persistent runtime data, caches, and session history
 data/
 .data/
+bifrost/data/
 
 # Drafts and blog articles
 blogs/

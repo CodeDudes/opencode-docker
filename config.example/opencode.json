@@ -1,41 +1,17 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
+    "bifrost": {
+      "type": "remote",
+      "url": "http://host.docker.internal:{env:BIFROST_PORT}/mcp/sse",
+      "enabled": false
+    },
     "fetch": {
       "command": [
         "uvx",
         "mcp-server-fetch"
       ],
       "enabled": false
-    },
-    "filesystem": {
-      "command": [
-        "npx",
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "/workspace"
-      ],
-      "enabled": false
-    },
-    "sqlite": {
-      "command": [
-        "uvx",
-        "mcp-server-sqlite",
-        "--db-path",
-        "/workspace/dev.db"
-      ],
-      "enabled": false
-    },
-    "brave-search": {
-      "command": [
-        "npx",
-        "-y",
-        "@modelcontextprotocol/server-brave-search"
-      ],
-      "enabled": false,
-      "env": {
-        "BRAVE_API_KEY": "{env:BRAVE_API_KEY}"
-      }
     }
   }
 }

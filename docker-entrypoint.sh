@@ -34,7 +34,7 @@ YAML
 }
 
 # 1. Configure Git globals
-git config --global --add safe.directory /workspace
+git config --global --add safe.directory "*"
 git config --global credential.helper "store --file ${HOME}/.git-credentials"
 git config --global url."https://github.com/".insteadOf "git@github.com:"
 git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
@@ -54,7 +54,7 @@ if [ -f "$TOKEN_FILE" ]; then
     (
         last_token="$(get_current_token)"
         while true; do
-            sleep 30
+            sleep 10
             curr_token="$(get_current_token)"
             if [ -n "$curr_token" ] && [ "$curr_token" != "$last_token" ]; then
                 apply_token

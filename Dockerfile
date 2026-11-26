@@ -35,7 +35,7 @@ RUN GROUP_NAME=$(getent group ${USER_GID} | cut -d: -f1) && \
         adduser -u ${USER_UID} -G "$GROUP_NAME" -s /bin/bash -D opencode; \
         USER_NAME="opencode"; \
     fi && \
-    mkdir -p /home/opencode/go /workspace && \
+    mkdir -p /home/opencode/.config /home/opencode/.local/state /home/opencode/.local/share /home/opencode/.cache /home/opencode/go /workspace && \
     chown -R ${USER_UID}:${USER_GID} /home/opencode /workspace
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
