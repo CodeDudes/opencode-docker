@@ -34,7 +34,7 @@ YAML
 }
 
 # 1. Configure Git globals
-git config --global --add safe.directory /workspace
+git config --global --add safe.directory "*"
 git config --global credential.helper "store --file ${HOME}/.git-credentials"
 git config --global url."https://github.com/".insteadOf "git@github.com:"
 git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"

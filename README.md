@@ -28,7 +28,7 @@ Running an autonomous coding agent directly on your host machine gives untrusted
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/CodeDudes/opencode-docker.git ~/opencode-docker
+git clone https://github.com/EngCamp/opencode-docker.git ~/opencode-docker
 cd ~/opencode-docker
 ```
 
@@ -41,7 +41,7 @@ We enforce strict defense-in-depth isolation by separating host runner secrets f
    ```bash
    cp .env.example .env
    ```
-   *(These secrets are used strictly by the host `ocd` runner to mint short-lived tokens and are **never** mounted or exposed to the Docker container).*
+   *(These secrets are used strictly by the host `ocd` runner to mint short-lived tokens and are **never** mounted or exposed to the Docker container. Note: `GH_INSTALLATION_ID` acts as your default fallback—when running inside any GitHub repository, `ocd` automatically detects the installation ID for that organization).*
    ```dotenv
    GH_APP_ID="123456"
    GH_INSTALLATION_ID="87654321"
@@ -237,3 +237,9 @@ While `ocd` guarantees complete host machine isolation, autonomous agents with w
 * **Strict App Scoping:** Grant the GitHub App access only to specific target repositories.
 * **Provider Spend Limits:** Set monthly hard caps in your LLM provider dashboards to prevent runaway loops.
 * **Lockfiles:** Commit package lockfiles (`package-lock.json`, `uv.lock`, etc.) to prevent hallucinated package attacks.
+
+---
+
+## Future Enhancements
+
+* **Simultaneous Multi-Organization Token Routing:** Enable concurrent authentication across multiple private GitHub organizations within a single container session using Git's native `credential.useHttpPath = true`. This will automatically mint and route distinct installation tokens for submodules or cross-org monorepos (e.g. `github.com/OrgA/*` and `github.com/OrgB/*`) without manual token switching.

@@ -155,6 +155,10 @@ while [ $# -gt 0 ]; do
             echo "🔒 Running in SANDBOX mode: host caches and stored credentials disabled."
             shift
             ;;
+        --)
+            shift
+            break
+            ;;
         -*)
             echo "Unknown option: $1" >&2
             echo "Run 'ocd --help' for usage." >&2
@@ -181,10 +185,9 @@ fi
 # -----------------------------------------------------------------------------
 # 5. Validate GitHub App Configuration & Private Key
 # -----------------------------------------------------------------------------
-if [ -z "$GH_APP_ID" ] || [ "$GH_APP_ID" = "YOUR_APP_ID" ] || \
-   [ -z "$GH_INSTALLATION_ID" ] || [ "$GH_INSTALLATION_ID" = "YOUR_INSTALLATION_ID" ]; then
+if [ -z "$GH_APP_ID" ] || [ "$GH_APP_ID" = "YOUR_APP_ID" ]; then
     echo "Error: GitHub App configuration is missing." >&2
-    echo "Please set GH_APP_ID and GH_INSTALLATION_ID in $SCRIPT_DIR/.env" >&2
+    echo "Please set GH_APP_ID in $SCRIPT_DIR/.env" >&2
     echo "See $SCRIPT_DIR/.env.example for guidance." >&2
     exit 1
 fi
@@ -217,11 +220,37 @@ mint_gh_token() {
     fi
     local jwt="${header}.${payload}.${sig}"
 
+    # Auto-resolve installation ID from the current repository remote for multi-org support
+    local target_inst_id="$GH_INSTALLATION_ID"
+    local remote_url
+    remote_url=$(git -C "$WORKSPACE_DIR" config --get remote.origin.url 2>/dev/null || true)
+    if [ -n "$remote_url" ]; then
+        local repo_slug
+        repo_slug=$(echo "$remote_url" | sed -E 's#(git@github\.com:|https://github\.com/)##; s#\.git$##')
+        if [ -n "$repo_slug" ]; then
+            local inst_resp
+            inst_resp=$(curl -s -H "Authorization: Bearer $jwt" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${repo_slug}/installation" 2>/dev/null)
+            local detected_id
+            detected_id=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('id', ''))" <<< "$inst_resp" 2>/dev/null || true)
+            if [ -n "$detected_id" ]; then
+                target_inst_id="$detected_id"
+            fi
+        fi
+    fi
+
+    if [ -z "$target_inst_id" ] || [ "$target_inst_id" = "YOUR_INSTALLATION_ID" ]; then
+        echo "Error: GitHub App installation ID could not be determined." >&2
+        echo "Please set GH_INSTALLATION_ID in $SCRIPT_DIR/.env or ensure your GitHub App is installed on the repository/organization." >&2
+        return 1
+    fi
+
     local http_response
     http_response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
         -H "Authorization: Bearer $jwt" \
         -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/app/installations/${GH_INSTALLATION_ID}/access_tokens" 2>/dev/null)
+        "https://api.github.com/app/installations/${target_inst_id}/access_tokens" 2>/dev/null)
 
     local http_body
     http_body=$(echo "$http_response" | sed -e '$d')
@@ -242,7 +271,7 @@ mint_gh_token() {
                 return 2
                 ;;
             404)
-                echo "💡 Tip: Verify that GH_INSTALLATION_ID='$GH_INSTALLATION_ID' is correct and installed on your account/organization." >&2
+                echo "💡 Tip: Verify that GitHub App installation '$target_inst_id' exists and is installed on the repository/organization." >&2
                 return 2
                 ;;
             403)
@@ -342,6 +371,7 @@ trap cleanup EXIT INT TERM HUP
 # 8. Assemble Mounts & Environment Variables
 # -----------------------------------------------------------------------------
 mounts=(
+    -v "$WORKSPACE_DIR":"$WORKSPACE_DIR"
     -v "$WORKSPACE_DIR":/workspace
     -v "$TOKEN_FILE":/run/secrets/github_token:ro
 )
@@ -357,6 +387,7 @@ env_args=(
     -e GIT_COMMITTER_NAME="$BOT_NAME"
     -e GIT_COMMITTER_EMAIL="$BOT_EMAIL"
     -e BIFROST_PORT="$BIFROST_PORT"
+    -e HOST_WORKSPACE_DIR="$WORKSPACE_DIR"
 )
 
 # Container environment file (--env-file)
@@ -440,5 +471,5 @@ docker run "${docker_tty_args[@]}" --rm \
     --add-host host.docker.internal:host-gateway \
     "${mounts[@]}" \
     "${env_args[@]}" \
-    --workdir /workspace \
+    --workdir "$WORKSPACE_DIR" \
     "$IMAGE_NAME" "$@"
